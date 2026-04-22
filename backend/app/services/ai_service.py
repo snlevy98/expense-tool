@@ -1,0 +1,276 @@
+"""
+AI service using Google Gemini for:
+  - Batch category suggestions
+  - Merchant name normalization
+  - Recurring transaction detection
+"""
+
+import json
+import logging
+from collections import defaultdict
+from datetime import date, timedelta
+
+import google.generativeai as genai
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+genai.configure(api_key=settings.GEMINI_API_KEY)
+_model = genai.GenerativeModel("gemini-1.5-flash")
+
+
+# ---------------------------------------------------------------------------
+# Category suggestions
+# ---------------------------------------------------------------------------
+
+async def suggest_categories(
+    transactions: list[dict], categories: list[dict]
+) -> list[dict]:
+    """
+    Send a batch prompt to Gemini with transaction merchant names/descriptions
+    and the list of available categories/subcategories.
+
+    Returns list of:
+        {index, merchant_name, category_id, subcategory_id}
+
+    On any error returns an empty list so the import continues.
+    """
+    if not transactions or not categories:
+        return []
+
+    cat_text = json.dumps(
+        [
+            {
+                "id": str(c.get("id", "")),
+                "name": c.get("name", ""),
+                "subcategories": [
+                    {"id": str(s.get("id", "")), "name": s.get("name", "")}
+                    for s in c.get("subcategories", [])
+                ],
+            }
+            for c in categories
+        ],
+        indent=2,
+    )
+
+    txn_text = json.dumps(
+        [
+            {
+                "index": i,
+                "merchant_name": t.get("merchant_name", t.get("raw_description", "")),
+                "raw_description": t.get("raw_description", ""),
+                "amount": str(t.get("amount", "")),
+            }
+            for i, t in enumerate(transactions)
+        ],
+        indent=2,
+    )
+
+    prompt = f"""You are a financial categorization assistant.
+
+Given the following expense categories and subcategories:
+{cat_text}
+
+And the following transactions:
+{txn_text}
+
+For EACH transaction, suggest the most appropriate category_id and subcategory_id from the provided lists.
+If no subcategory fits, use null for subcategory_id.
+If no category fits, use null for both.
+
+Respond ONLY with a valid JSON array. Each element must have:
+  - index (integer, matching the transaction index)
+  - merchant_name (cleaned, human-readable merchant name)
+  - category_id (string UUID or null)
+  - subcategory_id (string UUID or null)
+
+Do not include any explanation or markdown fences. Output raw JSON only."""
+
+    try:
+        response = await _model.generate_content_async(prompt)
+        raw = response.text.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        suggestions = json.loads(raw)
+        return suggestions if isinstance(suggestions, list) else []
+    except Exception as exc:
+        logger.warning("AI category suggestion failed: %s", exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Merchant name normalization
+# ---------------------------------------------------------------------------
+
+async def normalize_merchant_name(raw_description: str) -> str:
+    """
+    Clean up a bank-formatted merchant description to a human-readable name.
+    Returns the raw description unchanged if the API call fails.
+    """
+    prompt = f"""Convert this bank transaction description to a clean, human-readable merchant name.
+Return ONLY the merchant name as plain text — no explanation, no punctuation other than what appears in a normal business name.
+
+Bank description: {raw_description}"""
+
+    try:
+        response = await _model.generate_content_async(prompt)
+        return response.text.strip()
+    except Exception as exc:
+        logger.warning("Merchant normalization failed for %r: %s", raw_description, exc)
+        return raw_description
+
+
+# ---------------------------------------------------------------------------
+# Batch merchant name normalization
+# ---------------------------------------------------------------------------
+
+async def normalize_merchant_names_batch(descriptions: list[str]) -> list[str]:
+    """
+    Normalize a batch of bank transaction descriptions to human-readable merchant names.
+    Returns a list of cleaned names in the same order.
+    Falls back to original descriptions on failure.
+    """
+    if not descriptions:
+        return []
+
+    numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(descriptions))
+    prompt = f"""Convert each bank transaction description below to a clean, human-readable merchant name.
+Return ONLY a JSON array of strings in the same order, one per line.
+Each string should be just the merchant name — no explanation, no extra punctuation.
+
+Descriptions:
+{numbered}
+
+Respond with a JSON array only, like: ["Merchant A", "Merchant B", ...]
+Do not include markdown fences or explanations."""
+
+    try:
+        response = await _model.generate_content_async(prompt)
+        raw = response.text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        names = json.loads(raw)
+        if isinstance(names, list) and len(names) == len(descriptions):
+            return [str(n).strip() or descriptions[i] for i, n in enumerate(names)]
+        return descriptions
+    except Exception as exc:
+        logger.warning("Batch merchant normalization failed: %s", exc)
+        return descriptions
+
+
+# ---------------------------------------------------------------------------
+# Recurring detection
+# ---------------------------------------------------------------------------
+
+async def detect_recurring(transactions: list[dict]) -> list[str]:
+    """
+    Analyze transactions to find recurring charges using a heuristic:
+      - Same merchant_name appearing 2+ times
+      - Similar amounts (within 5%)
+      - At regular intervals (weekly, bi-weekly, or monthly ±5 days)
+
+    Returns a list of transaction IDs (as strings) that are likely recurring.
+    Falls back to heuristic-only if the AI call fails.
+    """
+    if not transactions:
+        return []
+
+    # Group by normalized merchant name
+    by_merchant: dict[str, list[dict]] = defaultdict(list)
+    for txn in transactions:
+        key = (txn.get("merchant_name") or "").strip().lower()
+        if key:
+            by_merchant[key].append(txn)
+
+    candidate_ids: set[str] = set()
+
+    for merchant, txns in by_merchant.items():
+        if len(txns) < 2:
+            continue
+
+        # Sort by date
+        def _to_date(t: dict) -> date:
+            val = t.get("transaction_date")
+            if isinstance(val, date):
+                return val
+            try:
+                return date.fromisoformat(str(val))
+            except Exception:
+                return date.min
+
+        txns_sorted = sorted(txns, key=_to_date)
+        amounts = [float(t.get("amount", 0)) for t in txns_sorted]
+
+        # Check amount similarity (all within 5% of mean)
+        if len(amounts) >= 2:
+            mean_amount = sum(amounts) / len(amounts)
+            if mean_amount == 0:
+                continue
+            if all(abs(a - mean_amount) / abs(mean_amount) <= 0.05 for a in amounts):
+                # Check interval regularity
+                dates = [_to_date(t) for t in txns_sorted]
+                intervals = [
+                    (dates[i + 1] - dates[i]).days for i in range(len(dates) - 1)
+                ]
+                if intervals:
+                    mean_interval = sum(intervals) / len(intervals)
+                    # Accept weekly (~7), bi-weekly (~14), monthly (~30)
+                    is_regular = (
+                        (6 <= mean_interval <= 8)
+                        or (13 <= mean_interval <= 15)
+                        or (25 <= mean_interval <= 35)
+                        or (85 <= mean_interval <= 95)  # quarterly
+                    ) and all(
+                        abs(iv - mean_interval) <= 5 for iv in intervals
+                    )
+                    if is_regular:
+                        for t in txns_sorted:
+                            tid = t.get("id")
+                            if tid:
+                                candidate_ids.add(str(tid))
+
+    # Optionally enrich with AI if we have candidates worth double-checking
+    if candidate_ids and len(transactions) <= 200:
+        try:
+            txn_text = json.dumps(
+                [
+                    {
+                        "id": str(t.get("id", "")),
+                        "merchant_name": t.get("merchant_name", ""),
+                        "amount": str(t.get("amount", "")),
+                        "transaction_date": str(t.get("transaction_date", "")),
+                    }
+                    for t in transactions
+                ],
+                indent=2,
+            )
+
+            prompt = f"""Analyze the following transactions and identify which ones are recurring charges
+(subscriptions, utilities, memberships, loan payments, etc.).
+
+Transactions:
+{txn_text}
+
+Respond ONLY with a JSON array of transaction IDs (strings) that are recurring.
+Example: ["uuid-1", "uuid-2"]
+Do not include any explanation. Output raw JSON only."""
+
+            response = await _model.generate_content_async(prompt)
+            raw = response.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            ai_ids = json.loads(raw)
+            if isinstance(ai_ids, list):
+                candidate_ids.update(str(i) for i in ai_ids)
+        except Exception as exc:
+            logger.warning("AI recurring detection failed: %s", exc)
+
+    return list(candidate_ids)
