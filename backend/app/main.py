@@ -53,16 +53,18 @@ app = FastAPI(
 # CORS
 # ---------------------------------------------------------------------------
 
+# In development, allow all origins.
+# In production, read the comma-separated ALLOWED_ORIGINS env var.
 if settings.ENVIRONMENT == "development":
-    allowed_origins = ["*"]
+    _origins = ["*"]
 else:
-    allowed_origins = [
-        "https://expense-tracker.yourdomain.com",
-    ]
+    _origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
+    if not _origins:
+        logger.warning("ALLOWED_ORIGINS is not set — CORS will block all cross-origin requests.")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -92,24 +94,3 @@ async def health_check() -> dict:
     return {"status": "ok"}
 
 
-@app.get("/debug/token", tags=["debug"])
-async def debug_token(request: Request) -> dict:
-    from jose import jwt as jose_jwt, JWTError
-    from app.middleware.auth import _get_jwks
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return {"error": "No Bearer token"}
-    token = auth_header.split(" ", 1)[1]
-    try:
-        header = jose_jwt.get_unverified_header(token)
-        alg = header.get("alg", "HS256")
-        if alg == "HS256":
-            payload = jose_jwt.decode(token, settings.SUPABASE_JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False})
-        else:
-            jwks = await _get_jwks()
-            kid = header.get("kid")
-            key = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
-            payload = jose_jwt.decode(token, key, algorithms=[alg], options={"verify_aud": False})
-        return {"ok": True, "alg": alg, "payload": payload}
-    except JWTError as e:
-        return {"ok": False, "error": str(e), "header": header, "token_preview": token[:40]}

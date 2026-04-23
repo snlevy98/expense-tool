@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     SUPABASE_JWT_SECRET: str = ""
     GEMINI_API_KEY: str
     ENVIRONMENT: str = "development"
+    # Comma-separated list of allowed origins, e.g. "https://myapp.vercel.app"
+    ALLOWED_ORIGINS: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
