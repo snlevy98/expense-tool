@@ -101,13 +101,39 @@ Respond ONLY with a valid JSON array. Each element must have:
 Do not include any explanation or markdown fences. Output raw JSON only."""
 
     try:
-        raw = await asyncio.to_thread(_call_gemini, prompt)
-        raw = _strip_fences(raw)
+        response = await _model.generate_content_async(prompt)
+        raw = response.text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
         suggestions = json.loads(raw)
         return suggestions if isinstance(suggestions, list) else []
-    except Exception:
-        logger.exception("AI category suggestion chunk (offset=%d) failed", index_offset)
+    except Exception as exc:
+        logger.warning("AI category suggestion chunk failed: %s", exc)
         return []
+
+
+async def suggest_categories(
+    transactions: list[dict], categories: list[dict]
+) -> list[dict]:
+    """
+    Suggest category/subcategory for each transaction using Gemini.
+    Processes in chunks of _SUGGEST_CHUNK to stay within token limits.
+
+    Returns list of {index, category_id, subcategory_id}.
+    On any error returns an empty list so the import continues.
+    """
+    if not transactions or not categories:
+        return []
+
+    results: list[dict] = []
+    for start in range(0, len(transactions), _SUGGEST_CHUNK):
+        chunk = transactions[start : start + _SUGGEST_CHUNK]
+        results.extend(
+            await _suggest_categories_chunk(chunk, categories, index_offset=start)
+        )
+    return results
 
 
 async def suggest_categories(
@@ -136,6 +162,10 @@ async def suggest_categories(
 # Merchant name normalization
 # ---------------------------------------------------------------------------
 
+_NORMALIZE_CHUNK = 40   # descriptions per Gemini call
+_SUGGEST_CHUNK   = 50   # transactions per category-suggestion call
+
+
 async def _normalize_chunk(descriptions: list[str]) -> list[str]:
     """Normalize one chunk of descriptions. Returns originals on any failure."""
     numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(descriptions))
@@ -161,8 +191,8 @@ Do not include markdown fences or explanations."""
             len(descriptions),
         )
         return descriptions
-    except Exception:
-        logger.exception("Merchant normalization chunk failed")
+    except Exception as exc:
+        logger.warning("Merchant normalization chunk failed: %s", exc)
         return descriptions
 
 
