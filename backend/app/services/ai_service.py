@@ -4,35 +4,34 @@ AI service using Google Gemini for:
   - Merchant name normalization
   - Recurring transaction detection
 
-NOTE on async: google-generativeai's generate_content_async() uses
-blocking HTTP internally in v0.8.x and can deadlock inside uvicorn's
-event loop. We use asyncio.to_thread() with the synchronous
-generate_content() instead, which runs the call in a thread pool and
-cooperates correctly with the async event loop.
+Uses the official google-genai SDK (google.genai) with native async support
+via client.aio.models.generate_content().
 """
 
-import asyncio
 import json
 import logging
 from collections import defaultdict
 from datetime import date
 
-import google.generativeai as genai
+import google.genai as genai
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-genai.configure(api_key=settings.GEMINI_API_KEY)
-_model = genai.GenerativeModel("gemini-2.0-flash")
+_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+_MODEL = "gemini-2.5-flash"
 
 _NORMALIZE_CHUNK = 40   # descriptions per Gemini call
 _SUGGEST_CHUNK   = 50   # transactions per category-suggestion call
 
 
-def _call_gemini(prompt: str) -> str:
-    """Synchronous Gemini call — run via asyncio.to_thread to avoid blocking the event loop."""
-    response = _model.generate_content(prompt)
+async def _call_gemini(prompt: str) -> str:
+    """Async Gemini call using the native async client."""
+    response = await _client.aio.models.generate_content(
+        model=_MODEL,
+        contents=prompt,
+    )
     return response.text.strip()
 
 
@@ -101,39 +100,13 @@ Respond ONLY with a valid JSON array. Each element must have:
 Do not include any explanation or markdown fences. Output raw JSON only."""
 
     try:
-        response = await _model.generate_content_async(prompt)
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        raw = await _call_gemini(prompt)
+        raw = _strip_fences(raw)
         suggestions = json.loads(raw)
         return suggestions if isinstance(suggestions, list) else []
-    except Exception as exc:
-        logger.warning("AI category suggestion chunk failed: %s", exc)
+    except Exception:
+        logger.exception("AI category suggestion chunk (offset=%d) failed", index_offset)
         return []
-
-
-async def suggest_categories(
-    transactions: list[dict], categories: list[dict]
-) -> list[dict]:
-    """
-    Suggest category/subcategory for each transaction using Gemini.
-    Processes in chunks of _SUGGEST_CHUNK to stay within token limits.
-
-    Returns list of {index, category_id, subcategory_id}.
-    On any error returns an empty list so the import continues.
-    """
-    if not transactions or not categories:
-        return []
-
-    results: list[dict] = []
-    for start in range(0, len(transactions), _SUGGEST_CHUNK):
-        chunk = transactions[start : start + _SUGGEST_CHUNK]
-        results.extend(
-            await _suggest_categories_chunk(chunk, categories, index_offset=start)
-        )
-    return results
 
 
 async def suggest_categories(
@@ -162,10 +135,6 @@ async def suggest_categories(
 # Merchant name normalization
 # ---------------------------------------------------------------------------
 
-_NORMALIZE_CHUNK = 40   # descriptions per Gemini call
-_SUGGEST_CHUNK   = 50   # transactions per category-suggestion call
-
-
 async def _normalize_chunk(descriptions: list[str]) -> list[str]:
     """Normalize one chunk of descriptions. Returns originals on any failure."""
     numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(descriptions))
@@ -180,7 +149,7 @@ Respond with a JSON array only, like: ["Merchant A", "Merchant B", ...]
 Do not include markdown fences or explanations."""
 
     try:
-        raw = await asyncio.to_thread(_call_gemini, prompt)
+        raw = await _call_gemini(prompt)
         raw = _strip_fences(raw)
         names = json.loads(raw)
         if isinstance(names, list) and len(names) == len(descriptions):
@@ -191,8 +160,8 @@ Do not include markdown fences or explanations."""
             len(descriptions),
         )
         return descriptions
-    except Exception as exc:
-        logger.warning("Merchant normalization chunk failed: %s", exc)
+    except Exception:
+        logger.exception("Merchant normalization chunk failed")
         return descriptions
 
 
@@ -301,7 +270,7 @@ Example: ["uuid-1", "uuid-2"]
 Do not include any explanation. Output raw JSON only."""
 
         try:
-            raw = await asyncio.to_thread(_call_gemini, prompt)
+            raw = await _call_gemini(prompt)
             raw = _strip_fences(raw)
             ai_ids = json.loads(raw)
             if isinstance(ai_ids, list):
