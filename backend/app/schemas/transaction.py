@@ -77,3 +77,25 @@ class ImportConfirmRequest(BaseModel):
 class PaginatedTransactions(BaseModel):
     items: list[TransactionOut]
     total: int
+
+
+class EnrichItem(BaseModel):
+    index: int
+    raw_description: str
+    merchant_name: str
+    amount: Decimal
+
+
+class EnrichRequest(BaseModel):
+    transactions: list[EnrichItem]
+
+
+class EnrichResult(BaseModel):
+    index: int
+    merchant_name: str
+    ai_suggested_category_id: uuid.UUID | None = None
+    ai_suggested_subcategory_id: uuid.UUID | None = None
+
+
+class EnrichResponse(BaseModel):
+    results: list[EnrichResult]
