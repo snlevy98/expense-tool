@@ -100,6 +100,10 @@ export default function Import() {
         .map(({ include, index, is_duplicate, ...rest }) => ({
           ...rest,
           account_id: accountId,
+          // category/subcategory are never set at import time — AI suggestions
+          // are stored in ai_suggested_* and presented in the Categorize tab
+          category_id: null,
+          subcategory_id: null,
         }))
       await api.post('/api/import/confirm', { transactions: toImport })
       setSuccess(true)

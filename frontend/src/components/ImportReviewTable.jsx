@@ -1,8 +1,4 @@
-import { useCategories } from '../hooks/useCategories'
-
 export default function ImportReviewTable({ items, onUpdate }) {
-  const { categories, getSubcategories } = useCategories()
-
   if (!items || items.length === 0) {
     return (
       <div className="text-center py-12 text-slate-400">No transactions to review.</div>
@@ -28,14 +24,11 @@ export default function ImportReviewTable({ items, onUpdate }) {
             <th className="table-header">Description</th>
             <th className="table-header">Merchant</th>
             <th className="table-header">Amount</th>
-            <th className="table-header">Category</th>
-            <th className="table-header">Subcategory</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
           {items.map((item, index) => {
             const isIncluded = item.include !== false
-            const subcategories = getSubcategories(item.category_id)
 
             return (
               <tr
@@ -53,7 +46,10 @@ export default function ImportReviewTable({ items, onUpdate }) {
                 <td className="table-cell text-slate-500 whitespace-nowrap">
                   {item.transaction_date || item.date || '—'}
                 </td>
-                <td className="table-cell max-w-[200px] truncate text-slate-600" title={item.raw_description}>
+                <td
+                  className="table-cell max-w-[200px] truncate text-slate-600"
+                  title={item.raw_description}
+                >
                   {item.raw_description || '—'}
                 </td>
                 <td className="table-cell">
@@ -65,38 +61,13 @@ export default function ImportReviewTable({ items, onUpdate }) {
                     placeholder="Merchant name"
                   />
                 </td>
-                <td className={`table-cell font-medium tabular-nums whitespace-nowrap ${parseFloat(item.amount) < 0 ? 'text-emerald-600' : 'text-slate-800'}`}>
+                <td
+                  className={`table-cell font-medium tabular-nums whitespace-nowrap ${
+                    parseFloat(item.amount) < 0 ? 'text-emerald-600' : 'text-slate-800'
+                  }`}
+                >
                   {parseFloat(item.amount) < 0 ? '+' : ''}$
                   {Math.abs(parseFloat(item.amount) || 0).toFixed(2)}
-                </td>
-                <td className="table-cell">
-                  <select
-                    className="input py-1 text-xs min-w-[140px]"
-                    value={item.category_id || ''}
-                    onChange={(e) => {
-                      onUpdate(index, 'category_id', e.target.value)
-                      onUpdate(index, 'subcategory_id', '')
-                    }}
-                    disabled={!isIncluded}
-                  >
-                    <option value="">— None —</option>
-                    {categories.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </td>
-                <td className="table-cell">
-                  <select
-                    className="input py-1 text-xs min-w-[140px]"
-                    value={item.subcategory_id || ''}
-                    onChange={(e) => onUpdate(index, 'subcategory_id', e.target.value)}
-                    disabled={!isIncluded || !item.category_id || subcategories.length === 0}
-                  >
-                    <option value="">— None —</option>
-                    {subcategories.map((s) => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
                 </td>
               </tr>
             )
