@@ -101,9 +101,23 @@ Do not include any explanation or markdown fences. Output raw JSON only."""
 
     try:
         raw = await _call_gemini(prompt)
+        logger.info(
+            "Category suggestion raw response (offset=%d, len=%d): %.300s",
+            index_offset, len(raw), raw,
+        )
         raw = _strip_fences(raw)
         suggestions = json.loads(raw)
-        return suggestions if isinstance(suggestions, list) else []
+        if not isinstance(suggestions, list):
+            logger.warning(
+                "Category suggestion returned non-list (offset=%d): %s",
+                index_offset, type(suggestions).__name__,
+            )
+            return []
+        logger.info(
+            "Category suggestion parsed %d items for offset=%d",
+            len(suggestions), index_offset,
+        )
+        return suggestions
     except Exception:
         logger.exception("AI category suggestion chunk (offset=%d) failed", index_offset)
         return []

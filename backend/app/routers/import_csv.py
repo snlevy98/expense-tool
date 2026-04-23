@@ -138,9 +138,20 @@ async def preview_import(
         }
         for c in categories
     ]
+    logger.info(
+        "AI category suggestion: %d categories loaded, %d transactions to suggest for",
+        len(category_dicts),
+        len(unique_rows),
+    )
 
     suggestions = await ai_service.suggest_categories(unique_rows, category_dicts)
+    logger.info(
+        "AI category suggestion: received %d suggestions (expected %d)",
+        len(suggestions),
+        len(unique_rows),
+    )
     suggestion_map: dict[int, dict] = {s["index"]: s for s in suggestions if isinstance(s, dict)}
+    logger.info("AI category suggestion: suggestion_map has %d entries", len(suggestion_map))
 
     # ---- Build preview items ----
     preview_items: list[ImportPreviewItem] = []
