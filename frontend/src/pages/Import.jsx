@@ -1,10 +1,12 @@
-import { useState, useRef, useEffect } from 'react'
-import { Upload, CheckCircle, AlertCircle } from 'lucide-react'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { Upload, CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
 import ImportReviewTable from '../components/ImportReviewTable'
 import { useAppStore } from '../store/appStore'
 import { api } from '../services/api'
 
 const STEPS = ['Select File', 'Review', 'Confirm']
+const ENRICH_BATCH_SIZE = 15
+const MAX_RETRIES = 5
 
 function StepIndicator({ current }) {
   return (
@@ -45,9 +47,14 @@ export default function Import() {
   const [error, setError] = useState(null)
   const [success, setSuccess] = useState(false)
 
+  // Enrichment state
+  const [enrichStatus, setEnrichStatus] = useState('idle') // 'idle' | 'running' | 'retrying' | 'done'
+  const [enrichProgress, setEnrichProgress] = useState({ processed: 0, total: 0 })
+  const [retryCountdown, setRetryCountdown] = useState(0)
+  const abortEnrichRef = useRef(false)
+
   const fileInputRef = useRef()
 
-  // Fetch the most recent transaction date whenever the account changes
   useEffect(() => {
     if (!accountId) { setLastTxDate(null); return }
     api.get(`/api/accounts/${accountId}/last-transaction-date`)
@@ -55,10 +62,79 @@ export default function Import() {
       .catch(() => setLastTxDate(null))
   }, [accountId])
 
+  // Stop enrichment on unmount
+  useEffect(() => () => { abortEnrichRef.current = true }, [])
+
   const handleFileChange = (e) => {
     const f = e.target.files[0]
     if (f) setFile(f)
   }
+
+  // ---- Progressive AI enrichment ----
+
+  const processBatch = useCallback(async (batch, retryCount = 0) => {
+    if (abortEnrichRef.current) return
+    try {
+      const { data } = await api.post('/api/import/enrich', {
+        transactions: batch.map((item) => ({
+          index: item.index,
+          raw_description: item.raw_description,
+          merchant_name: item.merchant_name,
+          amount: String(item.amount),
+        })),
+      })
+      setItems((prev) => {
+        const next = [...prev]
+        for (const result of data.results) {
+          const i = result.index
+          if (i >= 0 && i < next.length) {
+            next[i] = {
+              ...next[i],
+              merchant_name: result.merchant_name || next[i].merchant_name,
+              ai_suggested_category_id: result.ai_suggested_category_id ?? null,
+              ai_suggested_subcategory_id: result.ai_suggested_subcategory_id ?? null,
+            }
+          }
+        }
+        return next
+      })
+    } catch (err) {
+      if (abortEnrichRef.current) return
+      const httpStatus = err.response?.status
+      if ((httpStatus === 429 || httpStatus === 503) && retryCount < MAX_RETRIES) {
+        const delaySec = Math.pow(2, retryCount) * 2  // 2, 4, 8, 16, 32 s
+        setEnrichStatus('retrying')
+        for (let t = delaySec; t > 0; t--) {
+          if (abortEnrichRef.current) return
+          setRetryCountdown(t)
+          await new Promise((r) => setTimeout(r, 1000))
+        }
+        setEnrichStatus('running')
+        setRetryCountdown(0)
+        return processBatch(batch, retryCount + 1)
+      }
+      console.error('Enrichment batch failed permanently:', err)
+    }
+  }, [])
+
+  const runEnrichment = useCallback(async (allItems) => {
+    abortEnrichRef.current = false
+    setEnrichStatus('running')
+    setEnrichProgress({ processed: 0, total: allItems.length })
+
+    for (let start = 0; start < allItems.length; start += ENRICH_BATCH_SIZE) {
+      if (abortEnrichRef.current) return
+      const batch = allItems.slice(start, start + ENRICH_BATCH_SIZE)
+      await processBatch(batch)
+      if (!abortEnrichRef.current) {
+        setEnrichProgress({ processed: start + batch.length, total: allItems.length })
+      }
+    }
+
+    if (!abortEnrichRef.current) setEnrichStatus('done')
+  }, [processBatch])
+
+  // ---- Import flow ----
 
   const handlePreview = async () => {
     if (!accountId) { setError('Please select an account.'); return }
@@ -73,9 +149,11 @@ export default function Import() {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       const previewItems = Array.isArray(data) ? data : (data.transactions ?? [])
-      setItems(previewItems.map((item) => ({ ...item, include: true })))
+      const enrichableItems = previewItems.map((item) => ({ ...item, include: true }))
+      setItems(enrichableItems)
       setStats({ duplicates_skipped: data.duplicates_skipped ?? 0 })
       setStep(1)
+      runEnrichment(enrichableItems)
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Preview failed')
     } finally {
@@ -94,14 +172,13 @@ export default function Import() {
   const handleConfirm = async () => {
     setError(null)
     setLoading(true)
+    abortEnrichRef.current = true  // stop enrichment before confirming
     try {
       const toImport = items
         .filter((item) => item.include !== false)
         .map(({ include, index, is_duplicate, ...rest }) => ({
           ...rest,
           account_id: accountId,
-          // category/subcategory are never set at import time — AI suggestions
-          // are stored in ai_suggested_* and presented in the Categorize tab
           category_id: null,
           subcategory_id: null,
         }))
@@ -123,6 +200,7 @@ export default function Import() {
   }
 
   const handleReset = () => {
+    abortEnrichRef.current = true
     setStep(0)
     setFile(null)
     setItems([])
@@ -131,6 +209,9 @@ export default function Import() {
     setError(null)
     setAccountId('')
     setLastTxDate(null)
+    setEnrichStatus('idle')
+    setEnrichProgress({ processed: 0, total: 0 })
+    setRetryCountdown(0)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -232,19 +313,48 @@ export default function Import() {
               <span className="ml-3 text-indigo-600 font-medium">{includedCount} selected</span>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setStep(0)} className="btn-secondary text-sm">Back</button>
+              <button
+                onClick={() => { abortEnrichRef.current = true; setStep(0) }}
+                className="btn-secondary text-sm"
+              >
+                Back
+              </button>
               <button onClick={handleConfirm} disabled={loading || includedCount === 0} className="btn-primary">
                 {loading ? 'Importing...' : `Confirm Import (${includedCount})`}
               </button>
             </div>
           </div>
 
+          {/* AI enrichment status */}
+          {enrichStatus !== 'idle' && (
+            <div className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium ${
+              enrichStatus === 'done'
+                ? 'bg-emerald-50 text-emerald-700'
+                : enrichStatus === 'retrying'
+                ? 'bg-amber-50 text-amber-700'
+                : 'bg-indigo-50 text-indigo-700'
+            }`}>
+              {enrichStatus === 'done' ? (
+                <><CheckCircle size={15} /> AI enrichment complete — merchant names and category suggestions are ready</>
+              ) : enrichStatus === 'retrying' ? (
+                <><AlertCircle size={15} /> Rate limited — retrying in {retryCountdown}s…</>
+              ) : (
+                <><Loader2 size={15} className="animate-spin" /> Enriching with AI: {enrichProgress.processed} / {enrichProgress.total} transactions</>
+              )}
+            </div>
+          )}
+
           <div className="card p-0 overflow-hidden">
             <ImportReviewTable items={items} onUpdate={handleUpdate} />
           </div>
 
           <div className="flex justify-end gap-2">
-            <button onClick={() => setStep(0)} className="btn-secondary">Back</button>
+            <button
+              onClick={() => { abortEnrichRef.current = true; setStep(0) }}
+              className="btn-secondary"
+            >
+              Back
+            </button>
             <button onClick={handleConfirm} disabled={loading || includedCount === 0} className="btn-primary">
               {loading ? 'Importing...' : `Confirm Import (${includedCount})`}
             </button>

@@ -26,13 +26,23 @@ _NORMALIZE_CHUNK = 40   # descriptions per Gemini call
 _SUGGEST_CHUNK   = 50   # transactions per category-suggestion call
 
 
+class RateLimitError(Exception):
+    """Gemini returned 429 or 503 — caller should retry with backoff."""
+
+
 async def _call_gemini(prompt: str) -> str:
-    """Async Gemini call using the native async client."""
-    response = await _client.aio.models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-    )
-    return response.text.strip()
+    """Async Gemini call. Raises RateLimitError on 429/503, re-raises others."""
+    try:
+        response = await _client.aio.models.generate_content(
+            model=_MODEL,
+            contents=prompt,
+        )
+        return response.text.strip()
+    except Exception as exc:
+        msg = str(exc)
+        if any(s in msg for s in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")):
+            raise RateLimitError(msg) from exc
+        raise
 
 
 def _strip_fences(raw: str) -> str:
@@ -51,7 +61,9 @@ def _strip_fences(raw: str) -> str:
 async def _suggest_categories_chunk(
     transactions: list[dict], categories: list[dict], index_offset: int
 ) -> list[dict]:
-    """Suggest categories for one chunk of transactions. Returns [] on failure."""
+    """
+    Suggest categories for one chunk. Propagates RateLimitError; returns [] on other failures.
+    """
     cat_text = json.dumps(
         [
             {
@@ -101,23 +113,14 @@ Do not include any explanation or markdown fences. Output raw JSON only."""
 
     try:
         raw = await _call_gemini(prompt)
-        logger.info(
-            "Category suggestion raw response (offset=%d, len=%d): %.300s",
-            index_offset, len(raw), raw,
-        )
         raw = _strip_fences(raw)
         suggestions = json.loads(raw)
         if not isinstance(suggestions, list):
-            logger.warning(
-                "Category suggestion returned non-list (offset=%d): %s",
-                index_offset, type(suggestions).__name__,
-            )
+            logger.warning("Category suggestion returned non-list (offset=%d): %s", index_offset, type(suggestions).__name__)
             return []
-        logger.info(
-            "Category suggestion parsed %d items for offset=%d",
-            len(suggestions), index_offset,
-        )
         return suggestions
+    except RateLimitError:
+        raise
     except Exception:
         logger.exception("AI category suggestion chunk (offset=%d) failed", index_offset)
         return []
@@ -129,9 +132,7 @@ async def suggest_categories(
     """
     Suggest category/subcategory for each transaction using Gemini.
     Processes in chunks of _SUGGEST_CHUNK to stay within token limits.
-
-    Returns list of {index, category_id, subcategory_id}.
-    On any error returns an empty list so the import continues.
+    Propagates RateLimitError; returns [] on other errors.
     """
     if not transactions or not categories:
         return []
@@ -150,7 +151,7 @@ async def suggest_categories(
 # ---------------------------------------------------------------------------
 
 async def _normalize_chunk(descriptions: list[str]) -> list[str]:
-    """Normalize one chunk of descriptions. Returns originals on any failure."""
+    """Normalize one chunk. Propagates RateLimitError; returns originals on other failures."""
     numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(descriptions))
     prompt = f"""Convert each bank transaction description below to a clean, human-readable merchant name.
 Return ONLY a JSON array of strings in the same order.
@@ -174,6 +175,8 @@ Do not include markdown fences or explanations."""
             len(descriptions),
         )
         return descriptions
+    except RateLimitError:
+        raise
     except Exception:
         logger.exception("Merchant normalization chunk failed")
         return descriptions
@@ -181,9 +184,8 @@ Do not include markdown fences or explanations."""
 
 async def normalize_merchant_names_batch(descriptions: list[str]) -> list[str]:
     """
-    Normalize a list of raw bank descriptions to human-readable merchant names.
-    Processes in chunks of _NORMALIZE_CHUNK to stay within Gemini token limits.
-    Falls back to the original description for any chunk that fails.
+    Normalize raw bank descriptions to human-readable merchant names.
+    Processes in chunks of _NORMALIZE_CHUNK. Propagates RateLimitError.
     """
     if not descriptions:
         return []
