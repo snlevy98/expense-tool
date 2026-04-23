@@ -10,10 +10,14 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10,
-    # Required for Supabase pgbouncer (transaction mode):
-    # asyncpg's built-in statement cache must be disabled or
-    # prepared statements will reference connections that no longer exist.
+    # Required for Supabase pgbouncer (transaction mode).
+    # Two separate caches must both be disabled:
+    # 1. asyncpg's own statement cache (connect_args, driver level)
+    # 2. SQLAlchemy's asyncpg PreparedStatement object cache (engine level)
+    # Without both, pgbouncer can route the EXECUTE to a different server
+    # connection than the one where the statement was PREPAREd.
     connect_args={"statement_cache_size": 0},
+    prepared_statement_cache_size=0,
 )
 
 AsyncSessionLocal = async_sessionmaker(
