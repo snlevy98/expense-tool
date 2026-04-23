@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.middleware.auth import require_auth
-from app.schemas.budget import BudgetDefaultUpdate, BudgetOut, BudgetUpsert
+from app.schemas.budget import BudgetDefaultUpdate, BudgetUpsert, CategoryBudgetOut
 from app.services.budget_service import (
     get_budgets_for_month,
     update_budget_default,
@@ -15,22 +15,22 @@ from app.services.budget_service import (
 router = APIRouter(prefix="/budgets", tags=["budgets"])
 
 
-@router.get("/", response_model=list[BudgetOut])
+@router.get("/", response_model=list[CategoryBudgetOut])
 async def list_budgets(
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2000, le=2100),
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
-) -> list[BudgetOut]:
+) -> list[CategoryBudgetOut]:
     return await get_budgets_for_month(db, month=month, year=year)
 
 
-@router.post("/", response_model=BudgetOut)
+@router.post("/")
 async def create_or_upsert_budget(
     body: BudgetUpsert,
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
-) -> BudgetOut:
+) -> dict:
     return await upsert_budget(db, body)
 
 

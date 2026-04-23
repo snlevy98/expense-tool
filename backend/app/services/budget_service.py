@@ -7,92 +7,168 @@ from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.budget import Budget
 from app.models.budget_default import BudgetDefault
 from app.models.category import Category
-from app.schemas.budget import BudgetDefaultUpdate, BudgetOut, BudgetUpsert
-
-
-def _to_budget_out(budget: Budget) -> BudgetOut:
-    return BudgetOut(
-        id=budget.id,
-        category_id=budget.category_id,
-        month=budget.month,
-        year=budget.year,
-        amount=Decimal(str(budget.amount)),
-        created_at=budget.created_at,
-        updated_at=budget.updated_at,
-        category_name=budget.category.name if budget.category else None,
-        category_color=budget.category.color if budget.category else None,
-    )
+from app.schemas.budget import (
+    BudgetDefaultUpdate,
+    BudgetUpsert,
+    CategoryBudgetOut,
+    SubcategoryBudgetOut,
+)
 
 
 async def get_budgets_for_month(
     db: AsyncSession, month: int, year: int
-) -> list[BudgetOut]:
+) -> list[CategoryBudgetOut]:
     """
     Return budgets for all active categories for the given month/year.
-    Auto-seeds from budget_defaults (or 0) if a budget row doesn't exist yet.
+
+    - Categories with active subcategories: one Budget row per subcategory is
+      auto-seeded at $0.  The category total is the sum.
+    - Categories without subcategories: one Budget row per category, seeded
+      from budget_defaults (or $0).  The amount is directly editable.
     """
-    # Load active categories with their budget_defaults
+    # Load active categories with their active subcategories
     cat_result = await db.execute(
-        select(Category).where(Category.is_active == True)
+        select(Category)
+        .where(Category.is_active == True)  # noqa: E712
+        .options(selectinload(Category.subcategories))
     )
     categories = cat_result.scalars().all()
 
-    # Load existing budgets for the month
+    # Load all existing budgets for this month/year
     budget_result = await db.execute(
         select(Budget).where(Budget.month == month, Budget.year == year)
     )
-    existing_budgets = {b.category_id: b for b in budget_result.scalars().all()}
+    budgets = budget_result.scalars().all()
 
-    # Load all budget defaults
+    # Index existing budgets
+    cat_only_budgets: dict[uuid.UUID, Budget] = {}   # category_id → row where sub IS NULL
+    sub_budgets: dict[uuid.UUID, Budget] = {}         # subcategory_id → row
+
+    for b in budgets:
+        if b.subcategory_id is None:
+            cat_only_budgets[b.category_id] = b
+        else:
+            sub_budgets[b.subcategory_id] = b
+
+    # Load category-level defaults
     default_result = await db.execute(select(BudgetDefault))
-    defaults = {bd.category_id: bd for bd in default_result.scalars().all()}
+    defaults: dict[uuid.UUID, BudgetDefault] = {
+        bd.category_id: bd for bd in default_result.scalars().all()
+    }
 
-    budgets_out: list[BudgetOut] = []
+    result_out: list[CategoryBudgetOut] = []
+
     for cat in categories:
-        if cat.id not in existing_budgets:
-            default_amount = Decimal("0")
-            if cat.id in defaults:
-                default_amount = Decimal(str(defaults[cat.id].default_amount))
+        active_subs = [s for s in cat.subcategories if s.is_active]
 
-            new_budget = Budget(
-                id=uuid.uuid4(),
-                category_id=cat.id,
-                month=month,
-                year=year,
-                amount=default_amount,
+        if active_subs:
+            # ── Category with subcategories ─────────────────────────────────
+            sub_outs: list[SubcategoryBudgetOut] = []
+
+            for sub in active_subs:
+                if sub.id not in sub_budgets:
+                    new_b = Budget(
+                        id=uuid.uuid4(),
+                        category_id=cat.id,
+                        subcategory_id=sub.id,
+                        month=month,
+                        year=year,
+                        amount=Decimal("0"),
+                    )
+                    db.add(new_b)
+                    await db.flush()
+                    sub_budgets[sub.id] = new_b
+
+                b = sub_budgets[sub.id]
+                sub_outs.append(
+                    SubcategoryBudgetOut(
+                        id=b.id,
+                        subcategory_id=sub.id,
+                        subcategory_name=sub.name,
+                        category_id=cat.id,
+                        month=month,
+                        year=year,
+                        amount=Decimal(str(b.amount)),
+                    )
+                )
+
+            total = sum(s.amount for s in sub_outs)
+            result_out.append(
+                CategoryBudgetOut(
+                    category_id=cat.id,
+                    category_name=cat.name,
+                    category_color=cat.color,
+                    has_subcategories=True,
+                    total_amount=total,
+                    budget_id=None,
+                    month=month,
+                    year=year,
+                    subcategory_budgets=sub_outs,
+                )
             )
-            db.add(new_budget)
-            await db.flush()
-            await db.refresh(new_budget)
-            # Attach category for serialization
-            new_budget.category = cat
-            existing_budgets[cat.id] = new_budget
 
-    for budget in existing_budgets.values():
-        if not hasattr(budget, "category") or budget.category is None:
-            # Lazy-load category
-            for cat in categories:
-                if cat.id == budget.category_id:
-                    budget.category = cat
-                    break
-        budgets_out.append(_to_budget_out(budget))
+        else:
+            # ── Category without subcategories ──────────────────────────────
+            if cat.id not in cat_only_budgets:
+                default_amount = Decimal("0")
+                if cat.id in defaults:
+                    default_amount = Decimal(str(defaults[cat.id].default_amount))
 
-    return budgets_out
+                new_b = Budget(
+                    id=uuid.uuid4(),
+                    category_id=cat.id,
+                    subcategory_id=None,
+                    month=month,
+                    year=year,
+                    amount=default_amount,
+                )
+                db.add(new_b)
+                await db.flush()
+                cat_only_budgets[cat.id] = new_b
+
+            b = cat_only_budgets[cat.id]
+            result_out.append(
+                CategoryBudgetOut(
+                    category_id=cat.id,
+                    category_name=cat.name,
+                    category_color=cat.color,
+                    has_subcategories=False,
+                    total_amount=Decimal(str(b.amount)),
+                    budget_id=b.id,
+                    month=month,
+                    year=year,
+                    subcategory_budgets=[],
+                )
+            )
+
+    return result_out
 
 
-async def upsert_budget(db: AsyncSession, body: BudgetUpsert) -> BudgetOut:
-    """Create or update a budget row for (category_id, month, year)."""
-    result = await db.execute(
-        select(Budget).where(
-            Budget.category_id == body.category_id,
-            Budget.month == body.month,
-            Budget.year == body.year,
+async def upsert_budget(db: AsyncSession, body: BudgetUpsert) -> dict:
+    """Create or update a budget row for (category_id [+ subcategory_id], month, year)."""
+    if body.subcategory_id is not None:
+        result = await db.execute(
+            select(Budget).where(
+                Budget.subcategory_id == body.subcategory_id,
+                Budget.month == body.month,
+                Budget.year == body.year,
+            )
         )
-    )
+    else:
+        result = await db.execute(
+            select(Budget).where(
+                Budget.category_id == body.category_id,
+                Budget.subcategory_id.is_(None),
+                Budget.month == body.month,
+                Budget.year == body.year,
+            )
+        )
+
     budget = result.scalar_one_or_none()
 
     if budget:
@@ -101,6 +177,7 @@ async def upsert_budget(db: AsyncSession, body: BudgetUpsert) -> BudgetOut:
         budget = Budget(
             id=uuid.uuid4(),
             category_id=body.category_id,
+            subcategory_id=body.subcategory_id,
             month=body.month,
             year=body.year,
             amount=body.amount,
@@ -110,13 +187,14 @@ async def upsert_budget(db: AsyncSession, body: BudgetUpsert) -> BudgetOut:
     await db.flush()
     await db.refresh(budget)
 
-    # Load category for response
-    cat_result = await db.execute(
-        select(Category).where(Category.id == budget.category_id)
-    )
-    budget.category = cat_result.scalar_one_or_none()
-
-    return _to_budget_out(budget)
+    return {
+        "id": str(budget.id),
+        "category_id": str(budget.category_id),
+        "subcategory_id": str(budget.subcategory_id) if budget.subcategory_id else None,
+        "month": budget.month,
+        "year": budget.year,
+        "amount": str(budget.amount),
+    }
 
 
 async def update_budget_default(
