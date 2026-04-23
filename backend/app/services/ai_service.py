@@ -24,21 +24,10 @@ _model = genai.GenerativeModel("gemini-1.5-flash")
 # Category suggestions
 # ---------------------------------------------------------------------------
 
-async def suggest_categories(
-    transactions: list[dict], categories: list[dict]
+async def _suggest_categories_chunk(
+    transactions: list[dict], categories: list[dict], index_offset: int
 ) -> list[dict]:
-    """
-    Send a batch prompt to Gemini with transaction merchant names/descriptions
-    and the list of available categories/subcategories.
-
-    Returns list of:
-        {index, merchant_name, category_id, subcategory_id}
-
-    On any error returns an empty list so the import continues.
-    """
-    if not transactions or not categories:
-        return []
-
+    """Suggest categories for one chunk of transactions. Returns [] on failure."""
     cat_text = json.dumps(
         [
             {
@@ -57,7 +46,7 @@ async def suggest_categories(
     txn_text = json.dumps(
         [
             {
-                "index": i,
+                "index": index_offset + i,
                 "merchant_name": t.get("merchant_name", t.get("raw_description", "")),
                 "raw_description": t.get("raw_description", ""),
                 "amount": str(t.get("amount", "")),
@@ -80,8 +69,7 @@ If no subcategory fits, use null for subcategory_id.
 If no category fits, use null for both.
 
 Respond ONLY with a valid JSON array. Each element must have:
-  - index (integer, matching the transaction index)
-  - merchant_name (cleaned, human-readable merchant name)
+  - index (integer, matching the transaction index above)
   - category_id (string UUID or null)
   - subcategory_id (string UUID or null)
 
@@ -90,7 +78,6 @@ Do not include any explanation or markdown fences. Output raw JSON only."""
     try:
         response = await _model.generate_content_async(prompt)
         raw = response.text.strip()
-        # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -98,8 +85,30 @@ Do not include any explanation or markdown fences. Output raw JSON only."""
         suggestions = json.loads(raw)
         return suggestions if isinstance(suggestions, list) else []
     except Exception as exc:
-        logger.warning("AI category suggestion failed: %s", exc)
+        logger.warning("AI category suggestion chunk failed: %s", exc)
         return []
+
+
+async def suggest_categories(
+    transactions: list[dict], categories: list[dict]
+) -> list[dict]:
+    """
+    Suggest category/subcategory for each transaction using Gemini.
+    Processes in chunks of _SUGGEST_CHUNK to stay within token limits.
+
+    Returns list of {index, category_id, subcategory_id}.
+    On any error returns an empty list so the import continues.
+    """
+    if not transactions or not categories:
+        return []
+
+    results: list[dict] = []
+    for start in range(0, len(transactions), _SUGGEST_CHUNK):
+        chunk = transactions[start : start + _SUGGEST_CHUNK]
+        results.extend(
+            await _suggest_categories_chunk(chunk, categories, index_offset=start)
+        )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -128,18 +137,15 @@ Bank description: {raw_description}"""
 # Batch merchant name normalization
 # ---------------------------------------------------------------------------
 
-async def normalize_merchant_names_batch(descriptions: list[str]) -> list[str]:
-    """
-    Normalize a batch of bank transaction descriptions to human-readable merchant names.
-    Returns a list of cleaned names in the same order.
-    Falls back to original descriptions on failure.
-    """
-    if not descriptions:
-        return []
+_NORMALIZE_CHUNK = 40   # descriptions per Gemini call
+_SUGGEST_CHUNK   = 50   # transactions per category-suggestion call
 
+
+async def _normalize_chunk(descriptions: list[str]) -> list[str]:
+    """Normalize one chunk of descriptions. Returns originals on any failure."""
     numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(descriptions))
     prompt = f"""Convert each bank transaction description below to a clean, human-readable merchant name.
-Return ONLY a JSON array of strings in the same order, one per line.
+Return ONLY a JSON array of strings in the same order.
 Each string should be just the merchant name — no explanation, no extra punctuation.
 
 Descriptions:
@@ -158,10 +164,31 @@ Do not include markdown fences or explanations."""
         names = json.loads(raw)
         if isinstance(names, list) and len(names) == len(descriptions):
             return [str(n).strip() or descriptions[i] for i, n in enumerate(names)]
+        logger.warning(
+            "Merchant normalization returned %d names for %d descriptions — using originals",
+            len(names) if isinstance(names, list) else -1,
+            len(descriptions),
+        )
         return descriptions
     except Exception as exc:
-        logger.warning("Batch merchant normalization failed: %s", exc)
+        logger.warning("Merchant normalization chunk failed: %s", exc)
         return descriptions
+
+
+async def normalize_merchant_names_batch(descriptions: list[str]) -> list[str]:
+    """
+    Normalize a list of raw bank descriptions to human-readable merchant names.
+    Processes in chunks of _NORMALIZE_CHUNK to stay within Gemini token limits.
+    Falls back to the original description for any chunk that fails.
+    """
+    if not descriptions:
+        return []
+
+    results: list[str] = []
+    for start in range(0, len(descriptions), _NORMALIZE_CHUNK):
+        chunk = descriptions[start : start + _NORMALIZE_CHUNK]
+        results.extend(await _normalize_chunk(chunk))
+    return results
 
 
 # ---------------------------------------------------------------------------
