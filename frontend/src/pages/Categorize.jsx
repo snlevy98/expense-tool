@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { CheckCircle, ChevronLeft, ChevronRight, Tag } from 'lucide-react'
+import { CheckCircle, ChevronLeft, ChevronRight } from 'lucide-react'
 import { getTransactions, updateTransaction } from '../services/transactionService'
 import { useCategories } from '../hooks/useCategories'
 import { useAppStore } from '../store/appStore'
@@ -9,20 +9,36 @@ import { formatCurrency } from '../utils/currency'
 const PAGE_SIZE = 50
 
 function InlineCategoryRow({ transaction, categories, getSubcategories, onCategorized }) {
-  const [categoryId, setCategoryId] = useState(transaction.category_id || '')
-  const [subcategoryId, setSubcategoryId] = useState(transaction.subcategory_id || '')
+  // Pre-populate from AI suggestions if available, otherwise from existing values
+  const [categoryId, setCategoryId] = useState(
+    transaction.ai_suggested_category_id || transaction.category_id || ''
+  )
+  const [subcategoryId, setSubcategoryId] = useState(
+    transaction.ai_suggested_subcategory_id || transaction.subcategory_id || ''
+  )
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
   const subcategories = getSubcategories(categoryId)
 
-  const save = useCallback(async (catId, subcatId) => {
-    if (!catId) return
+  // When category changes, keep the subcategory only if it belongs to the new category
+  const handleCategoryChange = (e) => {
+    const newCatId = e.target.value
+    setCategoryId(newCatId)
+    setSubcategoryId('')
+  }
+
+  const handleSubcategoryChange = (e) => {
+    setSubcategoryId(e.target.value)
+  }
+
+  const handleSave = useCallback(async () => {
+    if (!categoryId) return
     setSaving(true)
     try {
       await updateTransaction(transaction.id, {
-        category_id: catId || null,
-        subcategory_id: subcatId || null,
+        category_id: categoryId || null,
+        subcategory_id: subcategoryId || null,
       })
       setSaved(true)
       setTimeout(() => onCategorized(transaction.id), 600)
@@ -30,46 +46,38 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
       console.error('Failed to update:', err)
       setSaving(false)
     }
-  }, [transaction.id, onCategorized])
-
-  const handleCategoryChange = (e) => {
-    const newCatId = e.target.value
-    setCategoryId(newCatId)
-    setSubcategoryId('')
-    // Don't save yet — wait for subcategory selection or explicit Save click
-  }
-
-  const handleSubcategoryChange = (e) => {
-    const newSubId = e.target.value
-    setSubcategoryId(newSubId)
-    save(categoryId, newSubId)
-  }
-
-  const handleSave = () => {
-    save(categoryId, subcategoryId)
-  }
-
-  const hasSubcategories = subcategories.length > 0
+  }, [transaction.id, categoryId, subcategoryId, onCategorized])
 
   return (
-    <tr className={`transition-all duration-500 ${saved ? 'opacity-0 bg-emerald-50' : 'hover:bg-slate-50'}`}>
+    <tr
+      className={`transition-all duration-500 ${
+        saved ? 'opacity-0 bg-emerald-50' : 'hover:bg-slate-50'
+      }`}
+    >
       <td className="table-cell text-slate-500 whitespace-nowrap text-sm">
         {formatDate(transaction.transaction_date)}
       </td>
       <td className="table-cell">
         <div className="font-medium text-slate-800 text-sm">{transaction.merchant_name}</div>
         {transaction.merchant_name !== transaction.raw_description && (
-          <div className="text-xs text-slate-400 truncate max-w-[220px]" title={transaction.raw_description}>
+          <div
+            className="text-xs text-slate-400 truncate max-w-[220px]"
+            title={transaction.raw_description}
+          >
             {transaction.raw_description}
           </div>
         )}
       </td>
       <td className="table-cell text-sm text-slate-500">{transaction.account_name || '—'}</td>
-      <td className={`table-cell font-semibold tabular-nums text-sm whitespace-nowrap ${
-        parseFloat(transaction.amount) < 0 ? 'text-emerald-600' : 'text-slate-800'
-      }`}>
+      <td
+        className={`table-cell font-semibold tabular-nums text-sm whitespace-nowrap ${
+          parseFloat(transaction.amount) < 0 ? 'text-emerald-600' : 'text-slate-800'
+        }`}
+      >
         {formatCurrency(transaction.amount)}
       </td>
+
+      {/* Category */}
       <td className="table-cell">
         {saved ? (
           <span className="flex items-center gap-1 text-emerald-600 text-sm font-medium">
@@ -89,29 +97,39 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
           </select>
         )}
       </td>
+
+      {/* Subcategory */}
       <td className="table-cell">
         {!saved && (
-          hasSubcategories ? (
-            <select
-              className="input py-1 text-sm min-w-[160px]"
-              value={subcategoryId}
-              onChange={handleSubcategoryChange}
-              disabled={saving || !categoryId}
-            >
-              <option value="">— Select Subcategory —</option>
-              {subcategories.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-          ) : (
-            <button
-              className="btn-primary py-1 px-3 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
-              onClick={handleSave}
-              disabled={saving || !categoryId}
-            >
-              {saving ? 'Saving…' : 'Save'}
-            </button>
-          )
+          <select
+            className="input py-1 text-sm min-w-[160px]"
+            value={subcategoryId}
+            onChange={handleSubcategoryChange}
+            disabled={saving || !categoryId || subcategories.length === 0}
+          >
+            <option value="">— Select Subcategory —</option>
+            {subcategories.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        )}
+      </td>
+
+      {/* Confirm checkmark */}
+      <td className="table-cell w-12">
+        {!saved && (
+          <button
+            onClick={handleSave}
+            disabled={saving || !categoryId}
+            title={categoryId ? 'Save category' : 'Select a category first'}
+            className={`p-1.5 rounded-full transition-colors ${
+              categoryId
+                ? 'text-emerald-600 hover:bg-emerald-50'
+                : 'text-slate-300 cursor-not-allowed'
+            }`}
+          >
+            <CheckCircle size={22} />
+          </button>
         )}
       </td>
     </tr>
@@ -153,11 +171,14 @@ export default function Categorize() {
     fetchPage()
   }, [fetchPage])
 
-  const handleCategorized = useCallback((id) => {
-    setTransactions((prev) => prev.filter((t) => t.id !== id))
-    setTotal((prev) => Math.max(0, prev - 1))
-    fetchUncategorizedCount()
-  }, [fetchUncategorizedCount])
+  const handleCategorized = useCallback(
+    (id) => {
+      setTransactions((prev) => prev.filter((t) => t.id !== id))
+      setTotal((prev) => Math.max(0, prev - 1))
+      fetchUncategorizedCount()
+    },
+    [fetchUncategorizedCount]
+  )
 
   const isEmpty = !loading && transactions.length === 0
 
@@ -167,7 +188,7 @@ export default function Categorize() {
         <h1 className="text-2xl font-bold text-slate-800">Categorize Transactions</h1>
         <p className="text-slate-500 text-sm mt-0.5">
           {total > 0
-            ? `${total} transaction${total !== 1 ? 's' : ''} need${total === 1 ? 's' : ''} a category — select one to auto-save`
+            ? `${total} transaction${total !== 1 ? 's' : ''} need${total === 1 ? 's' : ''} categorizing — review the AI suggestions and click ✓ to confirm`
             : 'All transactions are categorized'}
         </p>
       </div>
@@ -190,13 +211,14 @@ export default function Categorize() {
                   <th className="table-header">Amount</th>
                   <th className="table-header">Category</th>
                   <th className="table-header">Subcategory</th>
+                  <th className="table-header w-12" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {loading
                   ? Array.from({ length: 8 }).map((_, i) => (
                       <tr key={i}>
-                        {Array.from({ length: 6 }).map((_, j) => (
+                        {Array.from({ length: 7 }).map((_, j) => (
                           <td key={j} className="table-cell">
                             <div className="skeleton h-4 rounded w-full" />
                           </td>
@@ -219,7 +241,8 @@ export default function Categorize() {
           {totalPages > 1 && (
             <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200">
               <p className="text-sm text-slate-500">
-                Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}
+                Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of{' '}
+                {total}
               </p>
               <div className="flex gap-2">
                 <button
