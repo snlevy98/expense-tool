@@ -183,7 +183,9 @@ async def _suggest_categories_chunk(
     txn_text = json.dumps(
         [
             {
-                "index": index_offset + i,
+                # Use the transaction's own index if set (preserves real indices across
+                # frontend batches); fall back to offset+i for internal chunking.
+                "index": t.get("index") if t.get("index") is not None else index_offset + i,
                 "merchant_name": t.get("merchant_name", t.get("raw_description", "")),
                 "raw_description": t.get("raw_description", ""),
                 "amount": str(t.get("amount", "")),
