@@ -161,7 +161,8 @@ async def normalize_merchant_names_batch(descriptions: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 async def _suggest_categories_chunk(
-    transactions: list[dict], categories: list[dict], index_offset: int
+    transactions: list[dict], categories: list[dict], index_offset: int,
+    examples_text: str = "",
 ) -> list[dict]:
     """Suggest categories for one chunk. Propagates RateLimitError; returns [] on other failures."""
     cat_text = json.dumps(
@@ -192,9 +193,15 @@ async def _suggest_categories_chunk(
         indent=2,
     )
 
+    examples_section = (
+        f"Learn from this user's past categorizations and follow these patterns "
+        f"when you see the same or similar merchants:\n{examples_text}\n\n"
+        if examples_text else ""
+    )
+
     prompt = f"""You are a financial categorization assistant.
 
-Given the following expense categories and subcategories:
+{examples_section}Given the following expense categories and subcategories:
 {cat_text}
 
 And the following transactions:
@@ -202,6 +209,7 @@ And the following transactions:
 
 For EACH transaction, pick the single best-matching category_id and subcategory_id.
 Rules:
+- If a transaction matches a merchant from the past examples above, use that same category
 - Always assign a category — use your best judgment even if uncertain
 - Only use null for category_id if the transaction is truly uncategorizable (e.g. an internal bank transfer or a payment to yourself)
 - Use null for subcategory_id only if no subcategory fits the chosen category
@@ -236,7 +244,7 @@ Output raw JSON only — no explanation, no markdown."""
 
 
 async def suggest_categories(
-    transactions: list[dict], categories: list[dict]
+    transactions: list[dict], categories: list[dict], examples_text: str = ""
 ) -> list[dict]:
     if not transactions or not categories:
         return []
@@ -244,7 +252,10 @@ async def suggest_categories(
     for start in range(0, len(transactions), _SUGGEST_CHUNK):
         results.extend(
             await _suggest_categories_chunk(
-                transactions[start : start + _SUGGEST_CHUNK], categories, index_offset=start
+                transactions[start : start + _SUGGEST_CHUNK],
+                categories,
+                index_offset=start,
+                examples_text=examples_text,
             )
         )
     return results

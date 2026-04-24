@@ -10,6 +10,7 @@ CSV import router: /preview, /enrich, and /confirm endpoints.
 import asyncio
 import logging
 import uuid
+from collections import defaultdict
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
@@ -160,6 +161,67 @@ async def enrich_batch(
         for c in categories
     ]
 
+    # ---- Build few-shot examples from past categorizations ----
+    # Prioritise transactions where the user corrected the AI suggestion,
+    # then manually categorized, then accepted AI suggestions.
+    # Deduplicate by merchant name, cap at 3 per category, 25 total.
+    examples_text = ""
+    try:
+        ex_result = await db.execute(
+            select(
+                Transaction.merchant_name,
+                Transaction.category_id,
+                Transaction.subcategory_id,
+                Transaction.ai_suggested_category_id,
+            )
+            .where(Transaction.category_id.isnot(None))
+            .where(Transaction.merchant_name.isnot(None))
+            .order_by(Transaction.updated_at.desc())
+            .limit(300)
+        )
+        ex_rows = ex_result.all()
+
+        # Sort: user corrections first (changed from AI suggestion), then the rest
+        ex_rows = sorted(
+            ex_rows,
+            key=lambda r: 0 if (
+                r.ai_suggested_category_id and
+                r.category_id != r.ai_suggested_category_id
+            ) else 1,
+        )
+
+        # Build name lookup maps from already-loaded category_dicts
+        cat_name_map = {c["id"]: c["name"] for c in category_dicts}
+        subcat_name_map = {
+            s["id"]: s["name"]
+            for c in category_dicts
+            for s in c["subcategories"]
+        }
+
+        seen_merchants: set[str] = set()
+        per_category: dict[str, int] = defaultdict(int)
+        lines: list[str] = []
+
+        for row in ex_rows:
+            merchant_key = row.merchant_name.strip().lower()
+            cat_key = str(row.category_id)
+            if merchant_key in seen_merchants or per_category[cat_key] >= 3:
+                continue
+            cat_name = cat_name_map.get(cat_key, "")
+            if not cat_name:
+                continue
+            sub_name = subcat_name_map.get(str(row.subcategory_id or ""), "")
+            label = f"{cat_name} > {sub_name}" if sub_name else cat_name
+            lines.append(f'  - "{row.merchant_name}" → {label}')
+            seen_merchants.add(merchant_key)
+            per_category[cat_key] += 1
+            if len(lines) >= 25:
+                break
+
+        examples_text = "\n".join(lines)
+    except Exception:
+        logger.exception("Failed to load categorization examples — proceeding without them")
+
     txns = [
         {
             "index": item.index,
@@ -178,8 +240,8 @@ async def enrich_batch(
             if name:
                 txn["merchant_name"] = name
 
-        # Suggest categories using normalized names
-        suggestions = await ai_service.suggest_categories(txns, category_dicts)
+        # Suggest categories using normalized names + past examples
+        suggestions = await ai_service.suggest_categories(txns, category_dicts, examples_text=examples_text)
 
     except ai_service.RateLimitError as exc:
         raise HTTPException(
