@@ -9,6 +9,7 @@ import {
   LogOut,
   Wallet,
   Tag,
+  ShoppingCart,
 } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import { useAppStore } from '../store/appStore'
@@ -17,7 +18,8 @@ const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/transactions', icon: CreditCard, label: 'Transactions' },
   { to: '/import', icon: Upload, label: 'Import' },
-  { to: '/categorize', icon: Tag, label: 'Categorize', badge: true },
+  { to: '/categorize', icon: Tag, label: 'Categorize', badgeKey: 'uncategorized' },
+  { to: '/amazon', icon: ShoppingCart, label: 'Amazon', badgeKey: 'amazon' },
   { to: '/budgets', icon: PiggyBank, label: 'Budgets' },
   { to: '/reports', icon: BarChart2, label: 'Reports' },
   { to: '/settings', icon: Settings, label: 'Settings' },
@@ -26,6 +28,12 @@ const navItems = [
 export default function Sidebar() {
   const signOut = useAuthStore((s) => s.signOut)
   const uncategorizedCount = useAppStore((s) => s.uncategorizedCount)
+  const amazonUncategorizedCount = useAppStore((s) => s.amazonUncategorizedCount)
+
+  const badgeCounts = {
+    uncategorized: uncategorizedCount,
+    amazon: amazonUncategorizedCount,
+  }
 
   return (
     <aside className="w-64 min-h-screen bg-slate-800 flex flex-col shrink-0">
@@ -39,28 +47,31 @@ export default function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-3 py-4 space-y-1">
-        {navItems.map(({ to, icon: Icon, label, badge }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={to === '/'}
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                isActive
-                  ? 'bg-indigo-600 text-white'
-                  : 'text-slate-300 hover:bg-slate-700 hover:text-white'
-              }`
-            }
-          >
-            <Icon size={18} />
-            <span className="flex-1">{label}</span>
-            {badge && uncategorizedCount > 0 && (
-              <span className="bg-amber-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
-                {uncategorizedCount > 99 ? '99+' : uncategorizedCount}
-              </span>
-            )}
-          </NavLink>
-        ))}
+        {navItems.map(({ to, icon: Icon, label, badgeKey }) => {
+          const count = badgeKey ? badgeCounts[badgeKey] : 0
+          return (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === '/'}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                  isActive
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-300 hover:bg-slate-700 hover:text-white'
+                }`
+              }
+            >
+              <Icon size={18} />
+              <span className="flex-1">{label}</span>
+              {count > 0 && (
+                <span className="bg-amber-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
+                  {count > 99 ? '99+' : count}
+                </span>
+              )}
+            </NavLink>
+          )
+        })}
       </nav>
 
       {/* Sign out */}

@@ -29,6 +29,8 @@ def _build_filters(
     amount_max: Decimal | None,
     is_recurring: bool | None,
     uncategorized: bool | None = None,
+    exclude_amazon: bool = False,
+    amazon_only: bool = False,
 ):
     conditions = []
     if account_id:
@@ -37,6 +39,10 @@ def _build_filters(
         conditions.append(Transaction.category_id.is_(None))
     elif category_id:
         conditions.append(Transaction.category_id == category_id)
+    if exclude_amazon:
+        conditions.append(Transaction.merchant_name != "Amazon")
+    if amazon_only:
+        conditions.append(Transaction.merchant_name == "Amazon")
     if subcategory_id:
         conditions.append(Transaction.subcategory_id == subcategory_id)
     if date_from:
@@ -100,6 +106,7 @@ async def get_transactions(
     amount_max: Decimal | None = None,
     is_recurring: bool | None = None,
     uncategorized: bool | None = None,
+    exclude_amazon: bool = False,
     sort_by: str = "date",
     sort_dir: str = "desc",
     skip: int = 0,
@@ -109,7 +116,8 @@ async def get_transactions(
     count_query = select(func.count()).select_from(Transaction)
     count_query = _build_filters(
         count_query, account_id, category_id, subcategory_id,
-        date_from, date_to, amount_min, amount_max, is_recurring, uncategorized
+        date_from, date_to, amount_min, amount_max, is_recurring, uncategorized,
+        exclude_amazon=exclude_amazon,
     )
     total: int = (await db.execute(count_query)).scalar_one()
 
@@ -121,7 +129,8 @@ async def get_transactions(
     )
     query = _build_filters(
         query, account_id, category_id, subcategory_id,
-        date_from, date_to, amount_min, amount_max, is_recurring, uncategorized
+        date_from, date_to, amount_min, amount_max, is_recurring, uncategorized,
+        exclude_amazon=exclude_amazon,
     )
     query = _apply_sort(query, sort_by, sort_dir)
     query = query.offset(skip).limit(limit)

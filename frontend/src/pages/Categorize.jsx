@@ -137,6 +137,7 @@ export default function Categorize() {
     try {
       const data = await getTransactions({
         uncategorized: true,
+        exclude_amazon: true,
         sort_by: 'date',
         sort_dir: 'desc',
         skip: page * PAGE_SIZE,

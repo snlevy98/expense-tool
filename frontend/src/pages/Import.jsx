@@ -37,6 +37,7 @@ function StepIndicator({ current }) {
 export default function Import() {
   const accounts = useAppStore((s) => s.accounts)
   const fetchUncategorizedCount = useAppStore((s) => s.fetchUncategorizedCount)
+  const fetchAmazonUncategorizedCount = useAppStore((s) => s.fetchAmazonUncategorizedCount)
 
   const [step, setStep] = useState(0)
   const [accountId, setAccountId] = useState('')
@@ -184,7 +185,8 @@ export default function Import() {
           subcategory_id: null,
         }))
       await api.post('/api/import/confirm', { transactions: toImport })
-      fetchUncategorizedCount()   // refresh the badge on the Categorize tab
+      fetchUncategorizedCount()        // refresh Categorize tab badge
+      fetchAmazonUncategorizedCount()  // refresh Amazon tab badge
       setSuccess(true)
       setStep(2)
     } catch (err) {

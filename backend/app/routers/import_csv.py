@@ -222,7 +222,11 @@ async def enrich_batch(
     except Exception:
         logger.exception("Failed to load categorization examples — proceeding without them")
 
-    txns = [
+    def _is_amazon(raw: str) -> bool:
+        upper = (raw or "").upper()
+        return "AMAZON" in upper or "AMZN" in upper
+
+    all_txns = [
         {
             "index": item.index,
             "raw_description": item.raw_description,
@@ -232,16 +236,29 @@ async def enrich_batch(
         for item in body.transactions
     ]
 
-    try:
-        # Normalize merchant names first
-        descriptions = [t["raw_description"] for t in txns]
-        normalized = await ai_service.normalize_merchant_names_batch(descriptions)
-        for txn, name in zip(txns, normalized):
-            if name:
-                txn["merchant_name"] = name
+    # Split Amazon vs non-Amazon — Amazon transactions skip AI entirely
+    amazon_txns = [t for t in all_txns if _is_amazon(t["raw_description"])]
+    regular_txns = [t for t in all_txns if not _is_amazon(t["raw_description"])]
 
-        # Suggest categories using normalized names + past examples
-        suggestions = await ai_service.suggest_categories(txns, category_dicts, examples_text=examples_text)
+    for t in amazon_txns:
+        t["merchant_name"] = "Amazon"
+
+    txns = all_txns  # keep original ordering for result assembly
+
+    try:
+        suggestions: list[dict] = []
+        if regular_txns:
+            # Normalize merchant names for non-Amazon transactions
+            descriptions = [t["raw_description"] for t in regular_txns]
+            normalized = await ai_service.normalize_merchant_names_batch(descriptions)
+            for txn, name in zip(regular_txns, normalized):
+                if name:
+                    txn["merchant_name"] = name
+
+            # Suggest categories using normalized names + past examples
+            suggestions = await ai_service.suggest_categories(
+                regular_txns, category_dicts, examples_text=examples_text
+            )
 
     except ai_service.RateLimitError as exc:
         raise HTTPException(

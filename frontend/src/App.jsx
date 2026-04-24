@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard'
 import Transactions from './pages/Transactions'
 import Import from './pages/Import'
 import Categorize from './pages/Categorize'
+import Amazon from './pages/Amazon'
 import Budgets from './pages/Budgets'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
@@ -41,6 +42,7 @@ export default function App() {
   const fetchCategories = useAppStore((s) => s.fetchCategories)
   const fetchAccounts = useAppStore((s) => s.fetchAccounts)
   const fetchUncategorizedCount = useAppStore((s) => s.fetchUncategorizedCount)
+  const fetchAmazonUncategorizedCount = useAppStore((s) => s.fetchAmazonUncategorizedCount)
 
   useEffect(() => {
     const cleanup = initialize()
@@ -52,8 +54,9 @@ export default function App() {
       fetchCategories()
       fetchAccounts()
       fetchUncategorizedCount()
+      fetchAmazonUncategorizedCount()
     }
-  }, [user, fetchCategories, fetchAccounts, fetchUncategorizedCount])
+  }, [user, fetchCategories, fetchAccounts, fetchUncategorizedCount, fetchAmazonUncategorizedCount])
 
   return (
     <Routes>
@@ -87,6 +90,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Categorize />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/amazon"
+        element={
+          <ProtectedRoute>
+            <Amazon />
           </ProtectedRoute>
         }
       />

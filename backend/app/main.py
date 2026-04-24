@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.jobs.recurring_detection import run_recurring_detection
-from app.routers import accounts, budgets, categories, import_csv, reports, subcategories, transactions
+from app.routers import accounts, amazon, budgets, categories, import_csv, reports, subcategories, transactions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -81,6 +81,7 @@ app.include_router(categories.router, prefix=API_PREFIX)
 app.include_router(subcategories.router, prefix=API_PREFIX)
 app.include_router(transactions.router, prefix=API_PREFIX)
 app.include_router(import_csv.router, prefix=API_PREFIX)
+app.include_router(amazon.router, prefix=API_PREFIX)
 app.include_router(budgets.router, prefix=API_PREFIX)
 app.include_router(reports.router, prefix=API_PREFIX)
 
