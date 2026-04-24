@@ -200,9 +200,12 @@ Given the following expense categories and subcategories:
 And the following transactions:
 {txn_text}
 
-For EACH transaction, suggest the most appropriate category_id and subcategory_id from the provided lists.
-If no subcategory fits, use null for subcategory_id.
-If no category fits, use null for both.
+For EACH transaction, pick the single best-matching category_id and subcategory_id.
+Rules:
+- Always assign a category — use your best judgment even if uncertain
+- Only use null for category_id if the transaction is truly uncategorizable (e.g. an internal bank transfer or a payment to yourself)
+- Use null for subcategory_id only if no subcategory fits the chosen category
+- Negative amounts are usually refunds or credits — assign a credits/income category if one exists, otherwise the category that fits the original charge type
 
 Respond ONLY with a valid JSON array. Each element must have:
   - index (integer, matching the transaction index above)
