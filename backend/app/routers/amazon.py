@@ -62,6 +62,15 @@ def _parse_price(price_str: str) -> Decimal:
         return Decimal("0.00")
 
 
+def _parse_quantity(val) -> int:
+    """Safely parse a quantity value; any non-positive or non-numeric → 1."""
+    try:
+        n = int(float(str(val).strip()))
+        return n if n > 0 else 1
+    except (ValueError, TypeError, AttributeError):
+        return 1
+
+
 async def _find_amazon_txn(
     db: AsyncSession,
     amount: Decimal,
@@ -207,9 +216,27 @@ async def analyze_orders(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse items file: {exc}")
 
-    # Normalise column names
-    orders_df.columns = [c.strip().lower() for c in orders_df.columns]
-    items_df.columns = [c.strip().lower() for c in items_df.columns]
+    # Normalise column names (strip whitespace, lowercase, drop BOM)
+    orders_df.columns = [c.strip().lower().lstrip("\ufeff") for c in orders_df.columns]
+    items_df.columns  = [c.strip().lower().lstrip("\ufeff") for c in items_df.columns]
+
+    # Validate that the right files were uploaded
+    orders_required = {"order id", "to", "payments"}
+    items_required  = {"order id", "description", "price"}
+    missing_orders = orders_required - set(orders_df.columns)
+    missing_items  = items_required  - set(items_df.columns)
+    if missing_orders:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Orders file is missing columns: {missing_orders}. "
+                   "Make sure you uploaded the correct file (one row per order).",
+        )
+    if missing_items:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Items file is missing columns: {missing_items}. "
+                   "Make sure you uploaded the correct file (one row per item).",
+        )
 
     # --- Identify grocery order IDs ---
     grocery_order_ids: set[str] = set(
@@ -226,7 +253,7 @@ async def analyze_orders(
         items_by_order.setdefault(oid, []).append({
             "description": str(row.get("description", "")).strip(),
             "price": _parse_price(str(row.get("price", "0"))),
-            "quantity": max(1, int(row.get("quantity", 1) or 1)),
+            "quantity": _parse_quantity(row.get("quantity", 1)),
             "asin": str(row.get("asin", "")).strip(),
         })
 
