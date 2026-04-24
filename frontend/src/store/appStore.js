@@ -11,6 +11,7 @@ export const useAppStore = create((set) => ({
   selectedMonth: now.getMonth() + 1,
   selectedYear: now.getFullYear(),
   uncategorizedCount: 0,
+  amazonUncategorizedCount: 0,
 
   fetchCategories: async () => {
     try {
@@ -32,8 +33,19 @@ export const useAppStore = create((set) => ({
 
   fetchUncategorizedCount: async () => {
     try {
-      const { data } = await api.get('/api/transactions/uncategorized-count')
+      const { data } = await api.get('/api/transactions/uncategorized-count', {
+        params: { exclude_amazon: true },
+      })
       set({ uncategorizedCount: data.count })
+    } catch {
+      // silently ignore
+    }
+  },
+
+  fetchAmazonUncategorizedCount: async () => {
+    try {
+      const { data } = await api.get('/api/amazon/uncategorized-count')
+      set({ amazonUncategorizedCount: data.count })
     } catch {
       // silently ignore
     }

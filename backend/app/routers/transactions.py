@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -23,11 +23,15 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 @router.get("/uncategorized-count")
 async def uncategorized_count(
+    exclude_amazon: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
 ) -> dict:
+    conditions = [Transaction.category_id.is_(None)]
+    if exclude_amazon:
+        conditions.append(Transaction.merchant_name != "Amazon")
     result = await db.execute(
-        select(func.count()).select_from(Transaction).where(Transaction.category_id.is_(None))
+        select(func.count()).select_from(Transaction).where(and_(*conditions))
     )
     return {"count": result.scalar_one()}
 
@@ -80,6 +84,7 @@ async def list_transactions(
     sort_by: str = Query("date", pattern="^(date|amount|merchant_name)$"),
     sort_dir: str = Query("desc", pattern="^(asc|desc)$"),
     uncategorized: bool | None = Query(None),
+    exclude_amazon: bool = Query(False),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
@@ -96,6 +101,7 @@ async def list_transactions(
         amount_max=amount_max,
         is_recurring=is_recurring,
         uncategorized=uncategorized,
+        exclude_amazon=exclude_amazon,
         sort_by=sort_by,
         sort_dir=sort_dir,
         skip=skip,
