@@ -16,7 +16,6 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
   const [subcategoryId, setSubcategoryId] = useState(
     transaction.ai_suggested_subcategory_id || transaction.subcategory_id || ''
   )
-  const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
   const subcategories = getSubcategories(categoryId)
@@ -32,26 +31,22 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
     setSubcategoryId(e.target.value)
   }
 
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(() => {
     if (!categoryId) return
-    setSaving(true)
-    try {
-      await updateTransaction(transaction.id, {
-        category_id: categoryId || null,
-        subcategory_id: subcategoryId || null,
-      })
-      setSaved(true)
-      setTimeout(() => onCategorized(transaction.id), 600)
-    } catch (err) {
-      console.error('Failed to update:', err)
-      setSaving(false)
-    }
+    // Optimistic: trigger collapse animation immediately, remove after it finishes
+    setSaved(true)
+    setTimeout(() => onCategorized(transaction.id), 150)
+    // Fire-and-forget save in the background
+    updateTransaction(transaction.id, {
+      category_id: categoryId || null,
+      subcategory_id: subcategoryId || null,
+    }).catch((err) => console.error('Failed to save category:', err))
   }, [transaction.id, categoryId, subcategoryId, onCategorized])
 
   return (
     <tr
-      className={`transition-all duration-500 ${
-        saved ? 'opacity-0 bg-emerald-50' : 'hover:bg-slate-50'
+      className={`transition-all duration-150 origin-top ${
+        saved ? 'opacity-0 scale-y-0' : 'hover:bg-slate-50'
       }`}
     >
       <td className="table-cell text-slate-500 whitespace-nowrap text-sm">
@@ -79,58 +74,48 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
 
       {/* Category */}
       <td className="table-cell">
-        {saved ? (
-          <span className="flex items-center gap-1 text-emerald-600 text-sm font-medium">
-            <CheckCircle size={14} /> Saved
-          </span>
-        ) : (
-          <select
-            className="input py-1 text-sm min-w-[160px]"
-            value={categoryId}
-            onChange={handleCategoryChange}
-            disabled={saving}
-          >
-            <option value="">— Select Category —</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
-        )}
+        <select
+          className="input py-1 text-sm min-w-[160px]"
+          value={categoryId}
+          onChange={handleCategoryChange}
+          disabled={saved}
+        >
+          <option value="">— Select Category —</option>
+          {categories.map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
       </td>
 
       {/* Subcategory */}
       <td className="table-cell">
-        {!saved && (
-          <select
-            className="input py-1 text-sm min-w-[160px]"
-            value={subcategoryId}
-            onChange={handleSubcategoryChange}
-            disabled={saving || !categoryId || subcategories.length === 0}
-          >
-            <option value="">— Select Subcategory —</option>
-            {subcategories.map((s) => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-          </select>
-        )}
+        <select
+          className="input py-1 text-sm min-w-[160px]"
+          value={subcategoryId}
+          onChange={handleSubcategoryChange}
+          disabled={saved || !categoryId || subcategories.length === 0}
+        >
+          <option value="">— Select Subcategory —</option>
+          {subcategories.map((s) => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
       </td>
 
       {/* Confirm checkmark */}
       <td className="table-cell w-12">
-        {!saved && (
-          <button
-            onClick={handleSave}
-            disabled={saving || !categoryId}
-            title={categoryId ? 'Save category' : 'Select a category first'}
-            className={`p-1.5 rounded-full transition-colors ${
-              categoryId
-                ? 'text-emerald-600 hover:bg-emerald-50'
-                : 'text-slate-300 cursor-not-allowed'
-            }`}
-          >
-            <CheckCircle size={22} />
-          </button>
-        )}
+        <button
+          onClick={handleSave}
+          disabled={saved || !categoryId}
+          title={categoryId ? 'Save category' : 'Select a category first'}
+          className={`p-1.5 rounded-full transition-colors ${
+            categoryId
+              ? 'text-emerald-600 hover:bg-emerald-50'
+              : 'text-slate-300 cursor-not-allowed'
+          }`}
+        >
+          <CheckCircle size={22} />
+        </button>
       </td>
     </tr>
   )
