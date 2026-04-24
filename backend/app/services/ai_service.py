@@ -210,26 +210,42 @@ And the following transactions:
 For EACH transaction, pick the single best-matching category_id and subcategory_id.
 Rules:
 - If a transaction matches a merchant from the past examples above, use that same category
-- Always assign a category — use your best judgment even if uncertain
-- Only use null for category_id if the transaction is truly uncategorizable (e.g. an internal bank transfer or a payment to yourself)
+- ALWAYS assign a category_id — NEVER return null for category_id. Every transaction can be categorized; pick the closest match even if you are uncertain
+- The only exception is a payment to yourself or a pure inter-account transfer with no merchant — those may use null
 - Use null for subcategory_id only if no subcategory fits the chosen category
 - Negative amounts are usually refunds or credits — assign a credits/income category if one exists, otherwise the category that fits the original charge type
+- Amazon, online retailers, streaming services, restaurants, cafes, and subscription charges always have a matching category — do not return null for these
 
-Respond ONLY with a valid JSON array. Each element must have:
-  - index (integer, matching the transaction index above)
-  - category_id (string UUID or null)
-  - subcategory_id (string UUID or null)
+Respond with a JSON object in exactly this shape:
+{{"suggestions": [
+  {{"index": <integer>, "category_id": "<UUID string>", "subcategory_id": "<UUID string or null>"}},
+  ...
+]}}
 
 Output raw JSON only — no explanation, no markdown."""
 
     try:
         raw = await _call_groq(prompt)
         raw = _strip_fences(raw)
-        # Groq json_object mode wraps array in an object sometimes
         parsed = json.loads(raw)
+        # Primary: explicit {"suggestions": [...]} shape we requested
         if isinstance(parsed, dict):
-            # unwrap {"suggestions": [...]} or similar
-            suggestions = next((v for v in parsed.values() if isinstance(v, list)), [])
+            if "suggestions" in parsed and isinstance(parsed["suggestions"], list):
+                suggestions = parsed["suggestions"]
+            else:
+                # Fallback: first list value (e.g. {"results": [...]})
+                suggestions = next((v for v in parsed.values() if isinstance(v, list)), None)
+                if suggestions is None:
+                    # Last resort: dict-of-dicts keyed by index str {"0": {...}, "1": {...}}
+                    candidates = list(parsed.values())
+                    if candidates and isinstance(candidates[0], dict) and "index" in candidates[0]:
+                        suggestions = candidates
+                    else:
+                        logger.warning(
+                            "Category suggestion: unrecognised dict shape (offset=%d): %s",
+                            index_offset, list(parsed.keys())[:5],
+                        )
+                        return []
         else:
             suggestions = parsed
         if not isinstance(suggestions, list):
