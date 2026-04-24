@@ -8,6 +8,8 @@ pydantic-settings==2.5.2
 python-multipart==0.0.12
 python-jose[cryptography]==3.3.0
 google-genai
+groq
+cohere
 pandas==2.2.3
 openpyxl==3.1.5
 python-dotenv==1.0.1

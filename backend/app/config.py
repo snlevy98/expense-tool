@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     SUPABASE_URL: str
     SUPABASE_JWT_SECRET: str = ""
     GEMINI_API_KEY: str
+    GROQ_API_KEY: str = ""
+    COHERE_API_KEY: str = ""
     ENVIRONMENT: str = "development"
     # Comma-separated list of allowed origins, e.g. "https://myapp.vercel.app"
     ALLOWED_ORIGINS: str = ""

@@ -1,11 +1,13 @@
 """
-AI service using Google Gemini for:
-  - Batch category suggestions
-  - Merchant name normalization
-  - Recurring transaction detection
+AI service — three tasks, three providers, three separate free-tier rate-limit pools:
 
-Uses the official google-genai SDK (google.genai) with native async support
-via client.aio.models.generate_content().
+  Merchant normalization  →  Google Gemini  (gemini-2.5-flash)
+  Category suggestion     →  Groq           (llama-3.3-70b-versatile)
+  Recurring detection     →  Cohere         (command-r7b-12-2024)
+
+Each provider falls back to Gemini if its API key is not configured.
+RateLimitError is raised on 429/503 so the /enrich endpoint can return HTTP 503
+and the frontend can retry with backoff.
 """
 
 import json
@@ -13,40 +15,95 @@ import logging
 from collections import defaultdict
 from datetime import date
 
+import cohere
 import google.genai as genai
+from groq import AsyncGroq
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(api_key=settings.GEMINI_API_KEY)
-_MODEL = "gemini-2.5-flash"
+# ---------------------------------------------------------------------------
+# Clients
+# ---------------------------------------------------------------------------
 
-_NORMALIZE_CHUNK = 40   # descriptions per Gemini call
-_SUGGEST_CHUNK   = 50   # transactions per category-suggestion call
+_gemini = genai.Client(api_key=settings.GEMINI_API_KEY)
+_GEMINI_MODEL = "gemini-2.5-flash"
 
+_groq = AsyncGroq(api_key=settings.GROQ_API_KEY) if settings.GROQ_API_KEY else None
+_GROQ_MODEL = "llama-3.3-70b-versatile"
+
+_cohere = cohere.AsyncClientV2(api_key=settings.COHERE_API_KEY) if settings.COHERE_API_KEY else None
+_COHERE_MODEL = "command-r7b-12-2024"
+
+_NORMALIZE_CHUNK = 40
+_SUGGEST_CHUNK   = 50
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit sentinel
+# ---------------------------------------------------------------------------
 
 class RateLimitError(Exception):
-    """Gemini returned 429 or 503 — caller should retry with backoff."""
+    """Provider returned 429 or 503 — caller should retry with backoff."""
 
+
+def _is_rate_limit(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(s in msg for s in ("429", "503", "rate_limit", "rate limit",
+                                   "resource_exhausted", "unavailable",
+                                   "too many requests", "toomanyrequests"))
+
+
+# ---------------------------------------------------------------------------
+# Per-provider callers
+# ---------------------------------------------------------------------------
 
 async def _call_gemini(prompt: str) -> str:
-    """Async Gemini call. Raises RateLimitError on 429/503, re-raises others."""
+    """Merchant normalization provider."""
     try:
-        response = await _client.aio.models.generate_content(
-            model=_MODEL,
-            contents=prompt,
-        )
-        return response.text.strip()
+        resp = await _gemini.aio.models.generate_content(model=_GEMINI_MODEL, contents=prompt)
+        return resp.text.strip()
     except Exception as exc:
-        msg = str(exc)
-        if any(s in msg for s in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")):
-            raise RateLimitError(msg) from exc
+        if _is_rate_limit(exc):
+            raise RateLimitError(str(exc)) from exc
+        raise
+
+
+async def _call_groq(prompt: str) -> str:
+    """Category suggestion provider. Falls back to Gemini if key not configured."""
+    if not _groq:
+        return await _call_gemini(prompt)
+    try:
+        resp = await _groq.chat.completions.create(
+            model=_GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as exc:
+        if _is_rate_limit(exc):
+            raise RateLimitError(str(exc)) from exc
+        raise
+
+
+async def _call_cohere(prompt: str) -> str:
+    """Recurring detection provider. Falls back to Gemini if key not configured."""
+    if not _cohere:
+        return await _call_gemini(prompt)
+    try:
+        resp = await _cohere.chat(
+            model=_COHERE_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.message.content[0].text.strip()
+    except Exception as exc:
+        if _is_rate_limit(exc):
+            raise RateLimitError(str(exc)) from exc
         raise
 
 
 def _strip_fences(raw: str) -> str:
-    """Remove markdown code fences that Gemini sometimes wraps around JSON."""
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -55,15 +112,58 @@ def _strip_fences(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Category suggestions
+# Merchant name normalization  (Gemini)
+# ---------------------------------------------------------------------------
+
+async def _normalize_chunk(descriptions: list[str]) -> list[str]:
+    """Normalize one chunk. Propagates RateLimitError; returns originals on other failures."""
+    numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(descriptions))
+    prompt = f"""Convert each bank transaction description below to a clean, human-readable merchant name.
+Return ONLY a JSON array of strings in the same order.
+Each string should be just the merchant name — no explanation, no extra punctuation.
+
+Descriptions:
+{numbered}
+
+Respond with a JSON array only, like: ["Merchant A", "Merchant B", ...]
+Do not include markdown fences or explanations."""
+
+    try:
+        raw = await _call_gemini(prompt)
+        raw = _strip_fences(raw)
+        names = json.loads(raw)
+        if isinstance(names, list) and len(names) == len(descriptions):
+            return [str(n).strip() or descriptions[i] for i, n in enumerate(names)]
+        logger.warning(
+            "Merchant normalization: got %d names for %d descriptions — using originals",
+            len(names) if isinstance(names, list) else -1,
+            len(descriptions),
+        )
+        return descriptions
+    except RateLimitError:
+        raise
+    except Exception:
+        logger.exception("Merchant normalization chunk failed")
+        return descriptions
+
+
+async def normalize_merchant_names_batch(descriptions: list[str]) -> list[str]:
+    if not descriptions:
+        return []
+    results: list[str] = []
+    for start in range(0, len(descriptions), _NORMALIZE_CHUNK):
+        results.extend(await _normalize_chunk(descriptions[start : start + _NORMALIZE_CHUNK]))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Category suggestion  (Groq)
 # ---------------------------------------------------------------------------
 
 async def _suggest_categories_chunk(
     transactions: list[dict], categories: list[dict], index_offset: int
 ) -> list[dict]:
-    """
-    Suggest categories for one chunk. Propagates RateLimitError; returns [] on other failures.
-    """
+    """Suggest categories for one chunk. Propagates RateLimitError; returns [] on other failures."""
     cat_text = json.dumps(
         [
             {
@@ -109,107 +209,52 @@ Respond ONLY with a valid JSON array. Each element must have:
   - category_id (string UUID or null)
   - subcategory_id (string UUID or null)
 
-Do not include any explanation or markdown fences. Output raw JSON only."""
+Output raw JSON only — no explanation, no markdown."""
 
     try:
-        raw = await _call_gemini(prompt)
+        raw = await _call_groq(prompt)
         raw = _strip_fences(raw)
-        suggestions = json.loads(raw)
+        # Groq json_object mode wraps array in an object sometimes
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            # unwrap {"suggestions": [...]} or similar
+            suggestions = next((v for v in parsed.values() if isinstance(v, list)), [])
+        else:
+            suggestions = parsed
         if not isinstance(suggestions, list):
-            logger.warning("Category suggestion returned non-list (offset=%d): %s", index_offset, type(suggestions).__name__)
+            logger.warning("Category suggestion returned non-list (offset=%d)", index_offset)
             return []
         return suggestions
     except RateLimitError:
         raise
     except Exception:
-        logger.exception("AI category suggestion chunk (offset=%d) failed", index_offset)
+        logger.exception("Category suggestion chunk (offset=%d) failed", index_offset)
         return []
 
 
 async def suggest_categories(
     transactions: list[dict], categories: list[dict]
 ) -> list[dict]:
-    """
-    Suggest category/subcategory for each transaction using Gemini.
-    Processes in chunks of _SUGGEST_CHUNK to stay within token limits.
-    Propagates RateLimitError; returns [] on other errors.
-    """
     if not transactions or not categories:
         return []
-
     results: list[dict] = []
     for start in range(0, len(transactions), _SUGGEST_CHUNK):
-        chunk = transactions[start : start + _SUGGEST_CHUNK]
         results.extend(
-            await _suggest_categories_chunk(chunk, categories, index_offset=start)
+            await _suggest_categories_chunk(
+                transactions[start : start + _SUGGEST_CHUNK], categories, index_offset=start
+            )
         )
     return results
 
 
 # ---------------------------------------------------------------------------
-# Merchant name normalization
-# ---------------------------------------------------------------------------
-
-async def _normalize_chunk(descriptions: list[str]) -> list[str]:
-    """Normalize one chunk. Propagates RateLimitError; returns originals on other failures."""
-    numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(descriptions))
-    prompt = f"""Convert each bank transaction description below to a clean, human-readable merchant name.
-Return ONLY a JSON array of strings in the same order.
-Each string should be just the merchant name — no explanation, no extra punctuation.
-
-Descriptions:
-{numbered}
-
-Respond with a JSON array only, like: ["Merchant A", "Merchant B", ...]
-Do not include markdown fences or explanations."""
-
-    try:
-        raw = await _call_gemini(prompt)
-        raw = _strip_fences(raw)
-        names = json.loads(raw)
-        if isinstance(names, list) and len(names) == len(descriptions):
-            return [str(n).strip() or descriptions[i] for i, n in enumerate(names)]
-        logger.warning(
-            "Merchant normalization returned %d names for %d descriptions — using originals",
-            len(names) if isinstance(names, list) else -1,
-            len(descriptions),
-        )
-        return descriptions
-    except RateLimitError:
-        raise
-    except Exception:
-        logger.exception("Merchant normalization chunk failed")
-        return descriptions
-
-
-async def normalize_merchant_names_batch(descriptions: list[str]) -> list[str]:
-    """
-    Normalize raw bank descriptions to human-readable merchant names.
-    Processes in chunks of _NORMALIZE_CHUNK. Propagates RateLimitError.
-    """
-    if not descriptions:
-        return []
-
-    results: list[str] = []
-    for start in range(0, len(descriptions), _NORMALIZE_CHUNK):
-        chunk = descriptions[start : start + _NORMALIZE_CHUNK]
-        results.extend(await _normalize_chunk(chunk))
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Recurring detection
+# Recurring detection  (Cohere)
 # ---------------------------------------------------------------------------
 
 async def detect_recurring(transactions: list[dict]) -> list[str]:
     """
-    Analyze transactions to find recurring charges using a heuristic:
-      - Same merchant_name appearing 2+ times
-      - Similar amounts (within 5%)
-      - At regular intervals (weekly, bi-weekly, monthly, or quarterly)
-
-    Returns a list of transaction IDs (as strings) that are likely recurring.
-    Falls back to heuristic-only if the AI call fails.
+    Heuristic first-pass, then Cohere confirms / expands.
+    Returns a list of transaction IDs (strings) that are likely recurring.
     """
     if not transactions:
         return []
@@ -237,16 +282,13 @@ async def detect_recurring(transactions: list[dict]) -> list[str]:
 
         txns_sorted = sorted(txns, key=_to_date)
         amounts = [float(t.get("amount", 0)) for t in txns_sorted]
-
         if len(amounts) >= 2:
             mean_amount = sum(amounts) / len(amounts)
             if mean_amount == 0:
                 continue
             if all(abs(a - mean_amount) / abs(mean_amount) <= 0.05 for a in amounts):
                 dates = [_to_date(t) for t in txns_sorted]
-                intervals = [
-                    (dates[i + 1] - dates[i]).days for i in range(len(dates) - 1)
-                ]
+                intervals = [(dates[i + 1] - dates[i]).days for i in range(len(dates) - 1)]
                 if intervals:
                     mean_interval = sum(intervals) / len(intervals)
                     is_regular = (
@@ -257,9 +299,8 @@ async def detect_recurring(transactions: list[dict]) -> list[str]:
                     ) and all(abs(iv - mean_interval) <= 5 for iv in intervals)
                     if is_regular:
                         for t in txns_sorted:
-                            tid = t.get("id")
-                            if tid:
-                                candidate_ids.add(str(tid))
+                            if t.get("id"):
+                                candidate_ids.add(str(t["id"]))
 
     if candidate_ids and len(transactions) <= 200:
         txn_text = json.dumps(
@@ -274,7 +315,6 @@ async def detect_recurring(transactions: list[dict]) -> list[str]:
             ],
             indent=2,
         )
-
         prompt = f"""Analyze the following transactions and identify which ones are recurring charges
 (subscriptions, utilities, memberships, loan payments, etc.).
 
@@ -286,7 +326,7 @@ Example: ["uuid-1", "uuid-2"]
 Do not include any explanation. Output raw JSON only."""
 
         try:
-            raw = await _call_gemini(prompt)
+            raw = await _call_cohere(prompt)
             raw = _strip_fences(raw)
             ai_ids = json.loads(raw)
             if isinstance(ai_ids, list):
