@@ -93,7 +93,9 @@ async def preview_import(
     no_ref_rows = [r for r in parsed_rows if not r.get("external_reference")]
     import_fp_counts: Counter = Counter()
     for row in no_ref_rows:
-        fp = (str(row["transaction_date"]), str(row["amount"]), row["raw_description"])
+        # Use native types (date, Decimal) as keys — both are hashable and are what
+        # asyncpg expects in parameterised queries against Date/Numeric columns.
+        fp = (row["transaction_date"], row["amount"], row["raw_description"])
         import_fp_counts[fp] += 1
 
     fp_db_counts: dict[tuple, int] = {}
@@ -103,8 +105,8 @@ async def preview_import(
             select(func.count()).select_from(Transaction).where(
                 and_(
                     Transaction.account_id == account_id,
-                    Transaction.transaction_date == date_val,
-                    Transaction.amount == Decimal(amount_val),
+                    Transaction.transaction_date == date_val,   # date object
+                    Transaction.amount == amount_val,           # Decimal object
                     Transaction.raw_description == desc_val,
                 )
             )
@@ -118,7 +120,7 @@ async def preview_import(
         ref = row.get("external_reference")
         if ref:
             return ref in existing_refs
-        fp = (str(row["transaction_date"]), str(row["amount"]), row["raw_description"])
+        fp = (row["transaction_date"], row["amount"], row["raw_description"])
         db_count = fp_db_counts.get(fp, 0)
         if db_count == 0:
             return False
