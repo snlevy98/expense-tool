@@ -9,7 +9,7 @@ export const getTrends = async (months = 12, categoryId = null) => {
   const params = { months }
   if (categoryId) params.category_id = categoryId
   const { data } = await api.get('/api/reports/trends', { params })
-  return data
+  return data.points ?? []
 }
 
 export const getTopMerchants = async (month, year, limit = 10) => {
@@ -21,7 +21,7 @@ export const getTopMerchants = async (month, year, limit = 10) => {
 
 export const getYTD = async (year) => {
   const { data } = await api.get('/api/reports/ytd', { params: { year } })
-  return data
+  return data.categories ?? []
 }
 
 export const getRecurring = async () => {
