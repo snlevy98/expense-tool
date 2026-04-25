@@ -106,6 +106,116 @@ def _find_column(headers_normalized: list[str], candidates: list[str]) -> int | 
     return None
 
 
+def _looks_like_date_str(val: str) -> bool:
+    """Return True if val parses as a date under any of our known formats."""
+    val = val.strip().strip('"').split(" ")[0].split("T")[0]
+    for fmt in DATE_FORMATS:
+        try:
+            datetime.strptime(val, fmt)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _looks_like_amount_str(val: str) -> bool:
+    """Return True if val looks like a numeric amount (possibly with sign/currency symbols)."""
+    val = val.strip().strip('"')
+    if val in ("", "nan", "NaN", "None", "*", "-"):
+        return False
+    clean = re.sub(r"[^\d.\-]", "", val)
+    if not clean or clean == ".":
+        return False
+    try:
+        Decimal(clean)
+        return True
+    except InvalidOperation:
+        return False
+
+
+def _detect_columns_positionally(
+    rows: list[list[str]],
+) -> dict | None:
+    """
+    Heuristic positional column detection for headerless bank exports.
+    Scans sample rows to identify date, amount, and description columns by
+    their data patterns. Returns a dict with keys:
+        date_idx, amount_idx, desc_idx, sign_flip
+    or None if no reliable mapping can be found.
+    """
+    if not rows:
+        return None
+
+    n_cols = max((len(r) for r in rows), default=0)
+    if n_cols == 0:
+        return None
+
+    # Sample up to 10 rows for detection
+    sample = rows[:min(10, len(rows))]
+
+    date_idx: int | None = None
+    amount_idx: int | None = None
+
+    # Scan each column for date-like or amount-like values
+    for col in range(n_cols):
+        vals = [str(r[col]).strip().strip('"') for r in sample if col < len(r)]
+        vals = [v for v in vals if v and v.lower() not in ("nan", "")]
+        if not vals:
+            continue
+
+        date_hits = sum(1 for v in vals if _looks_like_date_str(v))
+        amount_hits = sum(1 for v in vals if _looks_like_amount_str(v))
+
+        threshold = len(vals) * 0.7
+        if date_hits >= threshold and date_idx is None:
+            date_idx = col
+        elif amount_hits >= threshold and amount_idx is None and col != date_idx:
+            amount_idx = col
+
+    if date_idx is None or amount_idx is None:
+        return None
+
+    # Description: column with the longest average text that isn't date or amount
+    desc_idx: int | None = None
+    max_avg_len = 0.0
+    for col in range(n_cols):
+        if col in (date_idx, amount_idx):
+            continue
+        vals = [str(r[col]).strip().strip('"') for r in sample if col < len(r)]
+        vals = [v for v in vals if v and v.lower() not in ("nan", "", "*")]
+        if vals:
+            avg = sum(len(v) for v in vals) / len(vals)
+            if avg > max_avg_len:
+                max_avg_len = avg
+                desc_idx = col
+
+    if desc_idx is None:
+        return None
+
+    # Detect sign convention: if majority of non-zero amounts are negative,
+    # the file uses negative-for-expense; flip signs to match app convention.
+    sign_flip = False
+    all_vals = [str(r[amount_idx]).strip().strip('"') for r in rows if amount_idx < len(r)]
+    parsed_amounts = []
+    for v in all_vals:
+        clean = re.sub(r"[^\d.\-]", "", v)
+        if clean and clean not in ("", "-", "."):
+            try:
+                parsed_amounts.append(Decimal(clean))
+            except InvalidOperation:
+                pass
+    nonzero = [a for a in parsed_amounts if a != 0]
+    if nonzero and sum(1 for a in nonzero if a < 0) > len(nonzero) * 0.5:
+        sign_flip = True
+
+    return {
+        "date_idx": date_idx,
+        "amount_idx": amount_idx,
+        "desc_idx": desc_idx,
+        "sign_flip": sign_flip,
+    }
+
+
 def _parse_date(raw: str) -> date:
     raw = str(raw).strip()
     # pandas may return a datetime string like "2024-01-15 00:00:00"
@@ -196,6 +306,23 @@ def _rows_to_transactions(rows: list[list[str]], filename: str) -> list[dict]:
     merchant_idx = _find_column(headers_norm, MERCHANT_CANDIDATES)
     reference_idx = _find_column(headers_norm, REFERENCE_CANDIDATES)
 
+    # If semantic detection failed, try positional heuristics on all rows.
+    # This handles headerless bank exports (e.g. Wells Fargo checking).
+    sign_flip = False
+    if date_idx is None or desc_idx is None:
+        positional = _detect_columns_positionally(rows)
+        if positional and positional.get("date_idx") is not None and positional.get("desc_idx") is not None:
+            header_row_idx = -1          # treat ALL rows as data (no header row)
+            date_idx = positional["date_idx"]
+            desc_idx = positional["desc_idx"]
+            if amount_idx is None:
+                amount_idx = positional.get("amount_idx")
+            debit_idx = None
+            credit_idx = None
+            merchant_idx = None
+            reference_idx = None
+            sign_flip = positional.get("sign_flip", False)
+
     if date_idx is None:
         raise ValueError(
             f"Cannot detect date column. Headers found: {headers_raw}. "
@@ -247,6 +374,10 @@ def _rows_to_transactions(rows: list[list[str]], filename: str) -> list[dict]:
         if has_single_amount:
             raw_amount = row[amount_idx].strip() if amount_idx is not None else "0"
             amount = _parse_amount(raw_amount)
+            # Headerless exports (e.g. Wells Fargo) use negative-for-expense;
+            # flip sign so positive = expense to match app convention.
+            if sign_flip:
+                amount = -amount
         else:
             debit_raw = row[debit_idx].strip() if debit_idx is not None else ""
             credit_raw = row[credit_idx].strip() if credit_idx is not None else ""

@@ -10,11 +10,11 @@ CSV import router: /preview, /enrich, and /confirm endpoints.
 import asyncio
 import logging
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -69,6 +69,8 @@ async def preview_import(
         return ImportPreviewResponse(transactions=[], duplicates_skipped=0)
 
     # ---- Duplicate detection ----
+
+    # --- External-reference deduplication (for banks that export a unique ID) ---
     refs_in_file = [r["external_reference"] for r in parsed_rows if r.get("external_reference")]
     existing_refs: set[str] = set()
     if refs_in_file:
@@ -82,33 +84,49 @@ async def preview_import(
         )
         existing_refs = {row[0] for row in ref_result.fetchall() if row[0]}
 
-    existing_fingerprints: set[tuple] = set()
+    # --- Fingerprint deduplication (date + amount + description) ---
+    # Count how many times each unique fingerprint appears in this import file.
+    # Then query the DB for how many existing transactions match each fingerprint.
+    # We consume one DB match per import row — so if two identical rows are in
+    # the file but only one is in the DB, the first is a duplicate and the second
+    # is imported as new.
     no_ref_rows = [r for r in parsed_rows if not r.get("external_reference")]
+    import_fp_counts: Counter = Counter()
     for row in no_ref_rows:
-        fp_result = await db.execute(
-            select(Transaction.id).where(
+        fp = (str(row["transaction_date"]), str(row["amount"]), row["raw_description"])
+        import_fp_counts[fp] += 1
+
+    fp_db_counts: dict[tuple, int] = {}
+    for fp in import_fp_counts:
+        date_val, amount_val, desc_val = fp
+        count_result = await db.execute(
+            select(func.count()).select_from(Transaction).where(
                 and_(
                     Transaction.account_id == account_id,
-                    Transaction.transaction_date == row["transaction_date"],
-                    Transaction.amount == row["amount"],
-                    Transaction.raw_description == row["raw_description"],
+                    Transaction.transaction_date == date_val,
+                    Transaction.amount == Decimal(amount_val),
+                    Transaction.raw_description == desc_val,
                 )
             )
         )
-        if fp_result.scalar_one_or_none():
-            existing_fingerprints.add(
-                (str(row["transaction_date"]), str(row["amount"]), row["raw_description"])
-            )
+        fp_db_counts[fp] = count_result.scalar_one()
+
+    # Track how many DB matches we've consumed per fingerprint as we scan rows
+    fp_consumed: Counter = Counter()
 
     def _is_duplicate(row: dict) -> bool:
         ref = row.get("external_reference")
         if ref:
             return ref in existing_refs
-        return (
-            str(row["transaction_date"]),
-            str(row["amount"]),
-            row["raw_description"],
-        ) in existing_fingerprints
+        fp = (str(row["transaction_date"]), str(row["amount"]), row["raw_description"])
+        db_count = fp_db_counts.get(fp, 0)
+        if db_count == 0:
+            return False
+        # Consume one DB match — subsequent identical rows in the same file are new
+        if fp_consumed[fp] < db_count:
+            fp_consumed[fp] += 1
+            return True
+        return False
 
     unique_rows = [r for r in parsed_rows if not _is_duplicate(r)]
     duplicates_skipped = len(parsed_rows) - len(unique_rows)
