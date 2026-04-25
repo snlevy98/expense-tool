@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -10,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.middleware.auth import require_auth
 from app.models.transaction import Transaction
-from app.schemas.transaction import PaginatedTransactions, TransactionOut, TransactionUpdate
+from app.schemas.transaction import EnrichPendingResponse, PaginatedTransactions, TransactionOut, TransactionUpdate
+from app.services.enrichment_service import run_background_enrichment
 from app.services.transaction_service import (
     delete_transaction,
     export_transactions_csv,
@@ -135,3 +137,36 @@ async def delete_transaction_endpoint(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found"
         )
+
+
+@router.post("/enrich-pending", response_model=EnrichPendingResponse)
+async def enrich_pending(
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> EnrichPendingResponse:
+    """
+    Find all unenriched non-Amazon transactions and kick off background enrichment.
+    Returns immediately — enrichment runs as a background task.
+    Capped at 500 rows per call; click again to process more after rate limits reset.
+    """
+    result = await db.execute(
+        select(Transaction)
+        .where(
+            and_(
+                Transaction.ai_enriched == False,   # noqa: E712
+                Transaction.merchant_name != "Amazon",
+            )
+        )
+        .limit(500)
+    )
+    pending = result.scalars().all()
+
+    if not pending:
+        return EnrichPendingResponse(queued=0, message="No transactions need enrichment.")
+
+    asyncio.create_task(run_background_enrichment(list(pending)))
+    count = len(pending)
+    return EnrichPendingResponse(
+        queued=count,
+        message=f"Enrichment started for {count} transaction{'s' if count != 1 else ''}.",
+    )

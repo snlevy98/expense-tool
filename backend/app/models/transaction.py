@@ -34,6 +34,7 @@ class Transaction(Base, TimestampMixin):
         UUID(as_uuid=True), nullable=True
     )
     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    ai_enriched: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     import_source: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     import_batch_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True

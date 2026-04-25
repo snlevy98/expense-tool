@@ -95,6 +95,7 @@ export default function Import() {
               merchant_name: result.merchant_name || next[i].merchant_name,
               ai_suggested_category_id: result.ai_suggested_category_id ?? null,
               ai_suggested_subcategory_id: result.ai_suggested_subcategory_id ?? null,
+              enriched: true,
             }
           }
         }
@@ -151,7 +152,7 @@ export default function Import() {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       const previewItems = Array.isArray(data) ? data : (data.transactions ?? [])
-      const enrichableItems = previewItems.map((item) => ({ ...item, include: true }))
+      const enrichableItems = previewItems.map((item) => ({ ...item, include: true, enriched: false }))
       setItems(enrichableItems)
       setStats({ duplicates_skipped: data.duplicates_skipped ?? 0 })
       setStep(1)
@@ -174,15 +175,16 @@ export default function Import() {
   const handleConfirm = async () => {
     setError(null)
     setLoading(true)
-    abortEnrichRef.current = true  // stop enrichment before confirming
+    abortEnrichRef.current = true  // stop queuing new enrichment batches
     try {
       const toImport = items
         .filter((item) => item.include !== false)
-        .map(({ include, index, is_duplicate, ...rest }) => ({
+        .map(({ include, index, is_duplicate, enriched, ...rest }) => ({
           ...rest,
           account_id: accountId,
           category_id: null,
           subcategory_id: null,
+          ai_enriched: enriched ?? false,
         }))
       await api.post('/api/import/confirm', { transactions: toImport })
       fetchUncategorizedCount()        // refresh Categorize tab badge
@@ -343,7 +345,7 @@ export default function Import() {
               ) : enrichStatus === 'retrying' ? (
                 <><AlertCircle size={15} /> Rate limited — retrying in {retryCountdown}s…</>
               ) : (
-                <><Loader2 size={15} className="animate-spin" /> Enriching with AI: {enrichProgress.processed} / {enrichProgress.total} transactions</>
+                <><Loader2 size={15} className="animate-spin" /> Enriching with AI: {enrichProgress.processed} / {enrichProgress.total} transactions — you can confirm now and the rest will finish in the background</>
               )}
             </div>
           )}
@@ -371,10 +373,15 @@ export default function Import() {
         <div className="card text-center py-12">
           <CheckCircle size={48} className="mx-auto text-emerald-500 mb-4" />
           <h2 className="text-xl font-semibold text-slate-800 mb-2">Import Successful!</h2>
-          <p className="text-slate-500 mb-6">
+          <p className="text-slate-500 mb-2">
             {includedCount} transaction{includedCount !== 1 ? 's' : ''} have been imported successfully.
           </p>
-          <button onClick={handleReset} className="btn-primary">
+          {items.some((i) => i.include !== false && !i.enriched) && (
+            <p className="text-sm text-indigo-600 mb-4">
+              AI suggestions are finishing in the background — check the Categorize tab in a moment.
+            </p>
+          )}
+          <button onClick={handleReset} className="btn-primary mt-2">
             Import More Transactions
           </button>
         </div>

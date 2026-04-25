@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
-import { CheckCircle, ChevronLeft, ChevronRight, XCircle } from 'lucide-react'
+import { AlertCircle, CheckCircle, ChevronLeft, ChevronRight, Loader2, Sparkles, XCircle } from 'lucide-react'
 import { getTransactions, updateTransaction, deleteTransaction } from '../services/transactionService'
 import { useCategories } from '../hooks/useCategories'
 import { useAppStore } from '../store/appStore'
 import { formatDate } from '../utils/date'
 import { formatCurrency } from '../utils/currency'
+import { api } from '../services/api'
 
 const PAGE_SIZE = 50
 
@@ -146,6 +147,9 @@ export default function Categorize() {
   const [page, setPage] = useState(0)
   const [total, setTotal] = useState(0)
 
+  const [enriching, setEnriching] = useState(false)
+  const [enrichResult, setEnrichResult] = useState(null)
+
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
   const fetchPage = useCallback(async () => {
@@ -182,18 +186,61 @@ export default function Categorize() {
     [fetchUncategorizedCount]
   )
 
+  const handleAutoEnrich = useCallback(async () => {
+    setEnriching(true)
+    setEnrichResult(null)
+    try {
+      const { data } = await api.post('/api/transactions/enrich-pending')
+      setEnrichResult({ queued: data.queued, message: data.message })
+      if (data.queued > 0) {
+        setTimeout(() => fetchPage(), 4000)
+      }
+    } catch (err) {
+      setEnrichResult({ error: err.response?.data?.detail || 'Failed to start enrichment.' })
+    } finally {
+      setEnriching(false)
+    }
+  }, [fetchPage])
+
   const isEmpty = !loading && transactions.length === 0
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-800">Categorize Transactions</h1>
-        <p className="text-slate-500 text-sm mt-0.5">
-          {total > 0
-            ? `${total} transaction${total !== 1 ? 's' : ''} need${total === 1 ? 's' : ''} categorizing — review the AI suggestions and click ✓ to confirm`
-            : 'All transactions are categorized'}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800">Categorize Transactions</h1>
+          <p className="text-slate-500 text-sm mt-0.5">
+            {total > 0
+              ? `${total} transaction${total !== 1 ? 's' : ''} need${total === 1 ? 's' : ''} categorizing — review the AI suggestions and click ✓ to confirm`
+              : 'All transactions are categorized'}
+          </p>
+        </div>
+        <button
+          onClick={handleAutoEnrich}
+          disabled={enriching}
+          className="btn-secondary shrink-0"
+        >
+          {enriching
+            ? <><Loader2 size={14} className="animate-spin" /> Enriching…</>
+            : <><Sparkles size={14} /> Auto-categorize</>}
+        </button>
       </div>
+
+      {enrichResult && (
+        <div className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium ${
+          enrichResult.error
+            ? 'bg-red-50 text-red-700'
+            : enrichResult.queued === 0
+            ? 'bg-slate-50 text-slate-600'
+            : 'bg-indigo-50 text-indigo-700'
+        }`}>
+          {enrichResult.error
+            ? <><AlertCircle size={14} /> {enrichResult.error}</>
+            : enrichResult.queued === 0
+            ? 'All transactions already have AI suggestions.'
+            : <><Loader2 size={14} className="animate-spin" /> AI enrichment started for {enrichResult.queued} transaction{enrichResult.queued !== 1 ? 's' : ''} — suggestions will appear shortly.</>}
+        </div>
+      )}
 
       {isEmpty ? (
         <div className="card text-center py-16">

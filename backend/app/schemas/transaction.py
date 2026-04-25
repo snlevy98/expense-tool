@@ -68,6 +68,7 @@ class ImportConfirmItem(BaseModel):
     subcategory_id: uuid.UUID | None = None
     ai_suggested_category_id: uuid.UUID | None = None
     ai_suggested_subcategory_id: uuid.UUID | None = None
+    ai_enriched: bool = False  # frontend sets True for rows that went through /enrich
 
 
 class ImportConfirmRequest(BaseModel):
@@ -99,3 +100,8 @@ class EnrichResult(BaseModel):
 
 class EnrichResponse(BaseModel):
     results: list[EnrichResult]
+
+
+class EnrichPendingResponse(BaseModel):
+    queued: int
+    message: str

@@ -32,6 +32,7 @@ from app.schemas.transaction import (
 )
 from app.services import ai_service
 from app.services.csv_service import parse_file
+from app.services.enrichment_service import run_background_enrichment
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/import", tags=["import"])
@@ -324,6 +325,7 @@ async def confirm_import(
             amount=item.amount,
             ai_suggested_category_id=item.ai_suggested_category_id,
             ai_suggested_subcategory_id=item.ai_suggested_subcategory_id,
+            ai_enriched=item.ai_enriched,
             is_recurring=False,
             import_source=item.import_source,
             import_batch_id=import_batch_id,
@@ -335,6 +337,11 @@ async def confirm_import(
     await db.flush()
 
     asyncio.create_task(_run_recurring_detection(saved_transactions, db))
+
+    # Enrich any transactions the frontend didn't finish processing before confirm
+    unenriched = [t for t in saved_transactions if not t.ai_enriched]
+    if unenriched:
+        asyncio.create_task(run_background_enrichment(unenriched))
 
     return {"imported": len(saved_transactions), "import_batch_id": str(import_batch_id)}
 
