@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { CheckCircle, ChevronLeft, ChevronRight } from 'lucide-react'
-import { getTransactions, updateTransaction } from '../services/transactionService'
+import { CheckCircle, ChevronLeft, ChevronRight, XCircle } from 'lucide-react'
+import { getTransactions, updateTransaction, deleteTransaction } from '../services/transactionService'
 import { useCategories } from '../hooks/useCategories'
 import { useAppStore } from '../store/appStore'
 import { formatDate } from '../utils/date'
@@ -8,7 +8,7 @@ import { formatCurrency } from '../utils/currency'
 
 const PAGE_SIZE = 50
 
-function InlineCategoryRow({ transaction, categories, getSubcategories, onCategorized }) {
+function InlineCategoryRow({ transaction, categories, getSubcategories, onCategorized, onDeleted }) {
   // Pre-populate from AI suggestions if available, otherwise from existing values
   const [categoryId, setCategoryId] = useState(
     transaction.ai_suggested_category_id || transaction.category_id || ''
@@ -30,6 +30,12 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
   const handleSubcategoryChange = (e) => {
     setSubcategoryId(e.target.value)
   }
+
+  const handleDelete = useCallback(() => {
+    setSaved(true)
+    setTimeout(() => onDeleted(transaction.id), 150)
+    deleteTransaction(transaction.id).catch((err) => console.error('Failed to delete transaction:', err))
+  }, [transaction.id, onDeleted])
 
   const handleSave = useCallback(() => {
     if (!categoryId) return
@@ -102,20 +108,30 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
         </select>
       </td>
 
-      {/* Confirm checkmark */}
-      <td className="table-cell w-12">
-        <button
-          onClick={handleSave}
-          disabled={saved || !categoryId}
-          title={categoryId ? 'Save category' : 'Select a category first'}
-          className={`p-1.5 rounded-full transition-colors ${
-            categoryId
-              ? 'text-emerald-600 hover:bg-emerald-50'
-              : 'text-slate-300 cursor-not-allowed'
-          }`}
-        >
-          <CheckCircle size={22} />
-        </button>
+      {/* Confirm / Delete */}
+      <td className="table-cell w-20">
+        <div className="flex items-center gap-1">
+          <button
+            onClick={handleSave}
+            disabled={saved || !categoryId}
+            title={categoryId ? 'Save category' : 'Select a category first'}
+            className={`p-1.5 rounded-full transition-colors ${
+              categoryId
+                ? 'text-emerald-600 hover:bg-emerald-50'
+                : 'text-slate-300 cursor-not-allowed'
+            }`}
+          >
+            <CheckCircle size={22} />
+          </button>
+          <button
+            onClick={handleDelete}
+            disabled={saved}
+            title="Delete transaction"
+            className="p-1.5 rounded-full transition-colors text-red-400 hover:bg-red-50 hover:text-red-600"
+          >
+            <XCircle size={22} />
+          </button>
+        </div>
       </td>
     </tr>
   )
@@ -218,6 +234,7 @@ export default function Categorize() {
                         categories={categories}
                         getSubcategories={getSubcategories}
                         onCategorized={handleCategorized}
+                        onDeleted={handleCategorized}
                       />
                     ))}
               </tbody>
