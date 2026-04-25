@@ -47,8 +47,8 @@ export default function Dashboard() {
 
   const donutData = (data?.rows ?? []).map((row) => ({
     name: row.category_name,
-    value: row.spent || 0,
-    color: row.color || '#6366f1',
+    value: parseFloat(row.spent) || 0,
+    color: row.category_color || '#6366f1',
   }))
 
   return (
@@ -139,7 +139,7 @@ export default function Dashboard() {
                           <div className="flex items-center gap-2">
                             <span
                               className="w-2.5 h-2.5 rounded-full shrink-0"
-                              style={{ backgroundColor: row.color || '#94a3b8' }}
+                              style={{ backgroundColor: row.category_color || '#94a3b8' }}
                             />
                             <span className="font-medium">{row.category_name}</span>
                           </div>
