@@ -54,7 +54,7 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Dashboard</h1>
           <p className="text-slate-500 text-sm mt-0.5">Monthly budget overview</p>
@@ -68,7 +68,7 @@ export default function Dashboard() {
 
       {/* Summary Cards */}
       {!loading && data && (
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="card">
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">Total Budget</p>
             <p className="text-2xl font-bold text-slate-800">{formatCurrency(data.total_budget)}</p>
@@ -87,7 +87,7 @@ export default function Dashboard() {
       )}
 
       {loading && (
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {[...Array(3)].map((_, i) => (
             <div key={i} className="card space-y-2">
               <div className="h-3 skeleton rounded w-24" />
@@ -97,9 +97,9 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div className="grid grid-cols-5 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Donut Chart */}
-        <div className="card col-span-2">
+        <div className="card lg:col-span-2">
           <h2 className="text-base font-semibold text-slate-700 mb-4">Spending Breakdown</h2>
           {loading ? (
             <div className="h-64 skeleton rounded-lg" />
@@ -109,7 +109,7 @@ export default function Dashboard() {
         </div>
 
         {/* Category Table */}
-        <div className="card col-span-3 p-0 overflow-hidden">
+        <div className="card lg:col-span-3 p-0 overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-200">
             <h2 className="text-base font-semibold text-slate-700">Budget by Category</h2>
           </div>

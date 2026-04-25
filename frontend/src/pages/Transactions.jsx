@@ -40,19 +40,19 @@ export default function Transactions() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Transactions</h1>
           <p className="text-slate-500 text-sm mt-0.5">{total} total transactions</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 shrink-0">
           <button onClick={refetch} className="btn-secondary" disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
-            Refresh
+            <span className="hidden sm:inline">Refresh</span>
           </button>
           <button onClick={handleExport} className="btn-secondary" disabled={exporting}>
             <Download size={15} />
-            {exporting ? 'Exporting...' : 'Export CSV'}
+            <span className="hidden sm:inline">{exporting ? 'Exporting...' : 'Export CSV'}</span>
           </button>
         </div>
       </div>
