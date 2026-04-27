@@ -104,21 +104,26 @@ export default function TransactionTable({
               return (
                 <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
                   <td className="table-cell text-slate-500 whitespace-nowrap">{formatDate(tx.transaction_date)}</td>
-                  <td className="table-cell text-slate-500 max-w-[200px]">
+                  <td className="table-cell font-medium text-slate-800 max-w-[280px]">
                     <span
-                      className="block truncate text-xs"
+                      className="block truncate"
                       title={tx.raw_description}
                     >
                       {tx.raw_description || '—'}
                     </span>
-                  </td>
-                  <td className="table-cell font-medium text-slate-800">
-                    {tx.merchant_name || '—'}
                     {tx.is_recurring && (
-                      <span className="ml-2 text-xs bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded">
+                      <span className="ml-0 text-xs bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded">
                         Recurring
                       </span>
                     )}
+                  </td>
+                  <td className="table-cell text-slate-500 max-w-[140px]">
+                    <span
+                      className="block truncate text-xs"
+                      title={tx.merchant_name}
+                    >
+                      {tx.merchant_name || '—'}
+                    </span>
                   </td>
                   <td className="table-cell">
                     {category ? (
