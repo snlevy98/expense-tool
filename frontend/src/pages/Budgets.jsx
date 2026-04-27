@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, ChevronDown, ChevronRight, Pencil } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Copy, Loader2, Pencil } from 'lucide-react'
 import MonthSwitcher from '../components/MonthSwitcher'
 import { useBudget } from '../hooks/useBudget'
 import { useAppStore } from '../store/appStore'
@@ -66,6 +66,60 @@ function AmountCell({ value, onSave }) {
         <Pencil size={14} />
       </button>
     </div>
+  )
+}
+
+// ── Editable pool % ─────────────────────────────────────────────────────────
+
+function PoolPctCell({ value, onSave }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(Math.round(value * 100))
+  const [saving, setSaving] = useState(false)
+
+  const commit = async () => {
+    const pct = Math.max(1, Math.min(100, parseInt(draft) || 80))
+    setSaving(true)
+    try {
+      await onSave(pct / 100)
+      setEditing(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') commit()
+    if (e.key === 'Escape') { setEditing(false); setDraft(Math.round(value * 100)) }
+  }
+
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        <input
+          type="number"
+          min="1"
+          max="100"
+          className="input w-16 py-0.5 text-sm text-center"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onBlur={commit}
+          autoFocus
+        />
+        <span className="text-slate-500">%</span>
+      </span>
+    )
+  }
+
+  return (
+    <button
+      onClick={() => { setDraft(Math.round(value * 100)); setEditing(true) }}
+      className="inline-flex items-center gap-1 font-semibold text-indigo-700 hover:underline"
+      disabled={saving}
+    >
+      {Math.round(value * 100)}%
+      <Pencil size={12} className="text-indigo-400" />
+    </button>
   )
 }
 
@@ -152,12 +206,35 @@ function CategoryDirectRow({ catBudget, onSave }) {
 
 export default function Budgets() {
   const setMonth = useAppStore((s) => s.setMonth)
-  const { budgets, loading, error, saveBudget, selectedMonth, selectedYear } = useBudget()
+  const {
+    budgets,
+    poolInfo,
+    loading,
+    error,
+    saveBudget,
+    savePoolPct,
+    fillFromLastMonth,
+    selectedMonth,
+    selectedYear,
+  } = useBudget()
 
-  const totalBudget = budgets.reduce(
-    (sum, b) => sum + parseFloat(b.total_amount || 0),
-    0
-  )
+  const [filling, setFilling] = useState(false)
+  const [fillResult, setFillResult] = useState(null)
+
+  const handleFill = async () => {
+    setFilling(true)
+    setFillResult(null)
+    try {
+      const result = await fillFromLastMonth()
+      setFillResult(result.copied)
+    } catch {
+      setFillResult(-1)
+    } finally {
+      setFilling(false)
+    }
+  }
+
+  const isOverBudget = poolInfo.leftover < 0
 
   return (
     <div className="space-y-6">
@@ -175,13 +252,63 @@ export default function Budgets() {
         </div>
       )}
 
+      {/* Pool Summary Panel */}
+      <div className="card space-y-3">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+          <span className="text-slate-600">
+            Budget pool:{' '}
+            <PoolPctCell value={poolInfo.pool_pct} onSave={savePoolPct} />
+            {' '}of last month's income{' '}
+            <span className="text-slate-500">({formatCurrency(poolInfo.last_month_income)})</span>
+            {' '}={' '}
+            <span className="font-semibold text-slate-800">{formatCurrency(poolInfo.pool_amount)}</span>
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+          <span className="text-slate-600">
+            Allocated:{' '}
+            <span className="font-semibold text-slate-800">{formatCurrency(poolInfo.allocated)}</span>
+          </span>
+          <span className={isOverBudget ? 'text-red-600 font-semibold' : 'text-slate-600'}>
+            Leftover:{' '}
+            <span className={`font-semibold ${isOverBudget ? 'text-red-600' : 'text-emerald-700'}`}>
+              {formatCurrency(poolInfo.leftover)}
+            </span>
+            {isOverBudget && (
+              <span className="ml-1 text-xs text-red-500">(over budget!)</span>
+            )}
+          </span>
+
+          <button
+            onClick={handleFill}
+            disabled={filling}
+            className="btn-secondary ml-auto"
+          >
+            {filling
+              ? <><Loader2 size={14} className="animate-spin" /> Filling…</>
+              : <><Copy size={14} /> Fill from Last Month</>}
+          </button>
+        </div>
+
+        {fillResult !== null && (
+          <p className="text-xs text-slate-500">
+            {fillResult === -1
+              ? 'Failed to copy budgets from last month.'
+              : fillResult === 0
+              ? 'No budgets found in the previous month to copy.'
+              : `Copied ${fillResult} budget${fillResult !== 1 ? 's' : ''} from last month.`}
+          </p>
+        )}
+      </div>
+
       <div className="card p-0 overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
           <h2 className="font-semibold text-slate-700">Category Budgets</h2>
           <span className="text-sm text-slate-500">
             Total:{' '}
             <span className="font-semibold text-slate-800">
-              {formatCurrency(totalBudget)}
+              {formatCurrency(poolInfo.allocated)}
             </span>
           </span>
         </div>

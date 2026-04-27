@@ -30,7 +30,9 @@ async def dashboard(
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
 ) -> DashboardResponse:
-    return await get_dashboard(db, month=month, year=year)
+    result = await get_dashboard(db, month=month, year=year)
+    await db.commit()
+    return result
 
 
 @router.get("/trends", response_model=TrendResponse)

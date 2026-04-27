@@ -30,6 +30,24 @@ class CategoryBudgetOut(BaseModel):
     subcategory_budgets: list[SubcategoryBudgetOut] = []
 
 
+class BudgetListResponse(BaseModel):
+    """Full budget list response including pool summary."""
+    budgets: list[CategoryBudgetOut]
+    pool_pct: Decimal
+    pool_amount: Decimal       # last_month_income × pool_pct
+    last_month_income: Decimal
+    allocated: Decimal         # sum of all category budget amounts this month
+    leftover: Decimal          # pool_amount − allocated
+
+
+class BudgetSettingsOut(BaseModel):
+    pool_pct: Decimal
+
+
+class BudgetSettingsUpdate(BaseModel):
+    pool_pct: Decimal  # expected range 0.01–1.00
+
+
 class BudgetUpsert(BaseModel):
     category_id: uuid.UUID
     subcategory_id: uuid.UUID | None = None

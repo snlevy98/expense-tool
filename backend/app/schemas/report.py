@@ -5,6 +5,15 @@ from pydantic import BaseModel
 from app.schemas.transaction import TransactionOut
 
 
+class DashboardSummary(BaseModel):
+    income: Decimal       # this month's Income-category transactions (receipts)
+    budget: Decimal       # last month's income × pool_pct
+    spent: Decimal        # non-excluded expense spending this month
+    remaining: Decimal    # budget − spent
+    investments: Decimal  # Investments-category spending this month
+    savings: Decimal      # income − investments − spent
+
+
 class DashboardCategoryRow(BaseModel):
     category_id: str
     category_name: str
@@ -18,6 +27,7 @@ class DashboardCategoryRow(BaseModel):
 class DashboardResponse(BaseModel):
     month: int
     year: int
+    summary: DashboardSummary
     rows: list[DashboardCategoryRow]
     total_budget: Decimal
     total_spent: Decimal

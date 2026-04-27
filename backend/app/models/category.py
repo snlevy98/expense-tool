@@ -16,6 +16,7 @@ class Category(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     color: Mapped[str] = mapped_column(String(7), nullable=False, default="#4A90E2")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    budget_excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     subcategories: Mapped[list["Subcategory"]] = relationship(  # noqa: F821
         "Subcategory", back_populates="category", lazy="selectin"

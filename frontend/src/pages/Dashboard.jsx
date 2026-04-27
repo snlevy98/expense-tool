@@ -18,6 +18,17 @@ function SkeletonRow() {
   )
 }
 
+function SummaryField({ label, value, highlight }) {
+  return (
+    <div className="flex flex-col items-center gap-0.5 px-4 py-3 min-w-0">
+      <p className="text-xs font-medium text-slate-500 uppercase tracking-wider whitespace-nowrap">{label}</p>
+      <p className={`text-xl font-bold tabular-nums ${highlight ?? 'text-slate-800'}`}>
+        {value}
+      </p>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const selectedMonth = useAppStore((s) => s.selectedMonth)
   const selectedYear = useAppStore((s) => s.selectedYear)
@@ -45,6 +56,8 @@ export default function Dashboard() {
     return () => { cancelled = true }
   }, [selectedMonth, selectedYear])
 
+  const summary = data?.summary ?? null
+
   const donutData = (data?.rows ?? []).map((row) => ({
     name: row.category_name,
     value: parseFloat(row.spent) || 0,
@@ -66,34 +79,60 @@ export default function Dashboard() {
         <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">{error}</div>
       )}
 
-      {/* Summary Cards */}
-      {!loading && data && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="card">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">Total Budget</p>
-            <p className="text-2xl font-bold text-slate-800">{formatCurrency(data.total_budget)}</p>
-          </div>
-          <div className="card">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">Total Spent</p>
-            <p className="text-2xl font-bold text-slate-800">{formatCurrency(data.total_spent)}</p>
-          </div>
-          <div className="card">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-1">Remaining</p>
-            <p className={`text-2xl font-bold ${(data.total_budget - data.total_spent) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-              {formatCurrency(data.total_budget - data.total_spent)}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {loading && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {[...Array(3)].map((_, i) => (
-            <div key={i} className="card space-y-2">
-              <div className="h-3 skeleton rounded w-24" />
-              <div className="h-8 skeleton rounded w-32" />
+      {/* 6-field Summary Row */}
+      {loading ? (
+        <div className="card flex flex-wrap divide-x divide-slate-100">
+          {[...Array(6)].map((_, i) => (
+            <div key={i} className="flex flex-col items-center gap-1 px-4 py-3 flex-1 min-w-[120px]">
+              <div className="h-3 skeleton rounded w-16" />
+              <div className="h-6 skeleton rounded w-24" />
             </div>
           ))}
+        </div>
+      ) : summary && (
+        <div className="card p-0 overflow-hidden">
+          <div className="flex flex-wrap divide-y sm:divide-y-0 sm:divide-x divide-slate-100">
+            <div className="flex-1 min-w-[120px]">
+              <SummaryField
+                label="Income"
+                value={formatCurrency(summary.income)}
+                highlight="text-emerald-700"
+              />
+            </div>
+            <div className="flex-1 min-w-[120px]">
+              <SummaryField
+                label="Budget"
+                value={formatCurrency(summary.budget)}
+              />
+            </div>
+            <div className="flex-1 min-w-[120px]">
+              <SummaryField
+                label="Spent"
+                value={formatCurrency(summary.spent)}
+              />
+            </div>
+            <div className="flex-1 min-w-[120px]">
+              <SummaryField
+                label="Remaining"
+                value={formatCurrency(summary.remaining)}
+                highlight={parseFloat(summary.remaining) < 0 ? 'text-red-600' : 'text-emerald-700'}
+              />
+            </div>
+            <div className="flex-1 min-w-[120px]">
+              <SummaryField
+                label="Investments"
+                value={formatCurrency(summary.investments)}
+                highlight="text-indigo-700"
+              />
+            </div>
+            <div className="flex-1 min-w-[120px]">
+              <SummaryField
+                label="Savings"
+                value={formatCurrency(summary.savings)}
+                highlight={parseFloat(summary.savings) < 0 ? 'text-red-600' : 'text-emerald-700'}
+              />
+            </div>
+          </div>
         </div>
       )}
 

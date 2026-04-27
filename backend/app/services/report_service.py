@@ -16,6 +16,7 @@ from app.models.transaction import Transaction
 from app.schemas.report import (
     DashboardCategoryRow,
     DashboardResponse,
+    DashboardSummary,
     TopMerchantRow,
     TrendPoint,
     TrendResponse,
@@ -24,6 +25,7 @@ from app.schemas.report import (
     YTDResponse,
 )
 from app.schemas.transaction import TransactionOut
+from app.services.budget_service import get_budget_settings, get_last_month_income
 
 
 def _dashboard_status(spent: Decimal, budget: Decimal) -> str:
@@ -42,49 +44,110 @@ async def get_dashboard(
 ) -> DashboardResponse:
     # Load all active categories
     cat_result = await db.execute(
-        select(Category).where(Category.is_active == True)
+        select(Category).where(Category.is_active == True)  # noqa: E712
     )
     categories = cat_result.scalars().all()
-    category_map = {c.id: c for c in categories}
 
-    # Load budgets for the month
+    # Identify special excluded categories by name
+    income_cat = next(
+        (c for c in categories if c.budget_excluded and c.name.lower() == "income"),
+        None,
+    )
+    investments_cat = next(
+        (c for c in categories if c.budget_excluded and c.name.lower() == "investments"),
+        None,
+    )
+
+    # Non-excluded categories only appear in the budget table
+    budgeted_categories = [c for c in categories if not c.budget_excluded]
+
+    # Load budgets for the month (non-excluded categories only)
     budget_result = await db.execute(
         select(Budget).where(Budget.month == month, Budget.year == year)
     )
-    budget_map: dict[uuid.UUID, Decimal] = {
-        b.category_id: Decimal(str(b.amount)) for b in budget_result.scalars().all()
-    }
+    # Sum budgets per category (subcategory rows count toward the category total)
+    budget_map: dict[uuid.UUID, Decimal] = {}
+    for b in budget_result.scalars().all():
+        budget_map[b.category_id] = budget_map.get(b.category_id, Decimal("0")) + Decimal(str(b.amount))
 
-    # Aggregate spending per category (amount > 0 only = expenses)
+    # Date range for this month
     start_date = date(year, month, 1)
     if month == 12:
         end_date = date(year + 1, 1, 1) - timedelta(days=1)
     else:
         end_date = date(year, month + 1, 1) - timedelta(days=1)
 
+    # Aggregate spending per category for the month (all transactions, both signs)
     spend_result = await db.execute(
         select(Transaction.category_id, func.sum(Transaction.amount).label("total"))
         .where(
             and_(
                 Transaction.transaction_date >= start_date,
                 Transaction.transaction_date <= end_date,
-                Transaction.amount > 0,
             )
         )
         .group_by(Transaction.category_id)
     )
-    spend_map: dict[uuid.UUID | None, Decimal] = {
+    spend_all: dict[uuid.UUID | None, Decimal] = {
         row.category_id: Decimal(str(row.total)) for row in spend_result.all()
     }
 
+    # ── Summary fields ──────────────────────────────────────────────────────
+    # Income: negative-amount transactions in the Income category (receipts)
+    income_raw = spend_all.get(income_cat.id, Decimal("0")) if income_cat else Decimal("0")
+    income = abs(income_raw) if income_raw < 0 else Decimal("0")
+
+    # Investments: positive-amount transactions in Investments category
+    investments_raw = spend_all.get(investments_cat.id, Decimal("0")) if investments_cat else Decimal("0")
+    investments = investments_raw if investments_raw > 0 else Decimal("0")
+
+    # Spent: positive-amount (expense) transactions for non-excluded categories only
+    # We sum positive amounts for budgeted categories
+    spent_result = await db.execute(
+        select(Transaction.category_id, func.sum(Transaction.amount).label("total"))
+        .where(
+            and_(
+                Transaction.transaction_date >= start_date,
+                Transaction.transaction_date <= end_date,
+                Transaction.amount > 0,
+                Transaction.category_id.in_([c.id for c in budgeted_categories]),
+            )
+        )
+        .group_by(Transaction.category_id)
+    )
+    spend_map: dict[uuid.UUID, Decimal] = {
+        row.category_id: Decimal(str(row.total)) for row in spent_result.all()
+    }
+
+    total_spent_budgeted = sum(spend_map.values(), Decimal("0"))
+
+    # Budget pool = last month's income × pool_pct
+    settings = await get_budget_settings(db)
+    last_month_income = await get_last_month_income(db, month, year)
+    pool_pct = Decimal(str(settings.pool_pct))
+    budget_pool = (last_month_income * pool_pct).quantize(Decimal("0.01"))
+
+    remaining = budget_pool - total_spent_budgeted
+    savings = income - investments - total_spent_budgeted
+
+    summary = DashboardSummary(
+        income=income,
+        budget=budget_pool,
+        spent=total_spent_budgeted,
+        remaining=remaining,
+        investments=investments,
+        savings=savings,
+    )
+
+    # ── Category rows (non-excluded only) ───────────────────────────────────
     rows: list[DashboardCategoryRow] = []
     total_budget = Decimal("0")
     total_spent = Decimal("0")
 
-    for cat in categories:
+    for cat in budgeted_categories:
         budget = budget_map.get(cat.id, Decimal("0"))
         spent = spend_map.get(cat.id, Decimal("0"))
-        remaining = budget - spent
+        remaining_cat = budget - spent
         status = _dashboard_status(spent, budget)
 
         total_budget += budget
@@ -97,7 +160,7 @@ async def get_dashboard(
                 category_color=cat.color,
                 budget=budget,
                 spent=spent,
-                remaining=remaining,
+                remaining=remaining_cat,
                 status=status,
             )
         )
@@ -105,6 +168,7 @@ async def get_dashboard(
     return DashboardResponse(
         month=month,
         year=year,
+        summary=summary,
         rows=rows,
         total_budget=total_budget,
         total_spent=total_spent,

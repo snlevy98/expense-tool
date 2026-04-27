@@ -54,11 +54,16 @@ async def reset_and_seed() -> None:
         created_cats = 0
         created_subs = 0
 
-        for cat_name, color, subcategory_names in SEED:
-            category = Category(id=uuid.uuid4(), name=cat_name, color=color)
+        for cat_name, color, budget_excluded, subcategory_names in SEED:
+            category = Category(
+                id=uuid.uuid4(),
+                name=cat_name,
+                color=color,
+                budget_excluded=budget_excluded,
+            )
             db.add(category)
             await db.flush()
-            print(f"  + {cat_name}  ({color})")
+            print(f"  + {cat_name}  ({color})  excluded={budget_excluded}")
             created_cats += 1
 
             for sub_name in subcategory_names:

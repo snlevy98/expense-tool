@@ -14,22 +14,25 @@ from app.models.category import Category
 from app.models.subcategory import Subcategory
 
 # ---------------------------------------------------------------------------
-# Data
+# Data — 4-tuple: (name, color, budget_excluded, subcategory_names)
 # ---------------------------------------------------------------------------
 
 SEED = [
-    # Pastel palette spanning the full color wheel for clear visual distinction
-    ("Debt",                "#FFB3B3", ["Car Loan", "Taxes (federal)", "Other"]),
-    ("Necessary Expenses",  "#B8E8C4", ["Car Insurance", "Groceries", "Health/Medical", "Home Insurance", "Home Supplies", "Rent", "Utilities"]),
-    ("For Funsies",         "#C8B4E8", ["Books", "Concerts", "DnD", "Gaming", "Fishies", "Hosting!", "Movies", "Outdoor activities", "Plant Dad", "Poker", "Sports", "Theatre", "Yoga", "Other"]),
-    ("Everyday",            "#FECFA8", ["Baking", "Bars", "Beauty", "Clothes", "Coffee Shops", "Dates", "Food Delivery", "Home Booze", "Restaurants", "Other"]),
-    ("Gifts",               "#FFB8D0", ["Gifts", "Donations", "Other"]),
-    ("Home",                "#FFF0A0", ["Dry Cleaning", "Furnishings", "Maids", "Moving", "Other"]),
-    ("Pets",                "#A8DCF0", ["Food", "Vet/medical", "Toys", "Supplies", "Other"]),
-    ("Transportation",      "#B0D4B8", ["Charging", "Repairs", "Registration/license", "Public transit", "Other"]),
-    ("Travel",              "#A4C4F4", ["Airfare", "Alcohol", "Entertainment", "Food", "Hotels", "Spa", "Transportation", "Other"]),
-    ("Work",                "#B8D8E8", ["TV", "Misc. Purchases", "Travel Expenses", "Other"]),
-    ("Investments",         "#D4B8D8", ["Robinhood - Preslie", "Robinhood - Sellars", "Life Insurance"]),
+    # budget_excluded=True: tracked but not counted toward the budget pool
+    ("Income",               "#A8E8B0", True,  ["Payroll", "Other"]),
+    # budget_excluded=False: normal budget categories
+    ("Debt",                 "#FFB3B3", False, ["Car Loan", "Taxes (federal)", "Other"]),
+    ("Necessary Expenses",   "#B8E8C4", False, ["Car Insurance", "Groceries", "Health/Medical", "Home Insurance", "Home Supplies", "Rent", "Utilities"]),
+    ("For Funsies",          "#C8B4E8", False, ["Books", "Concerts", "DnD", "Gaming", "Fishies", "Hosting!", "Movies", "Outdoor activities", "Plant Dad", "Poker", "Sports", "Theatre", "Yoga", "Other"]),
+    ("Everyday",             "#FECFA8", False, ["Baking", "Bars", "Beauty", "Clothes", "Coffee Shops", "Dates", "Food Delivery", "Home Booze", "Restaurants", "Other"]),
+    ("Gifts",                "#FFB8D0", False, ["Gifts", "Donations", "Other"]),
+    ("Home",                 "#FFF0A0", False, ["Dry Cleaning", "Furnishings", "Maids", "Moving", "Other"]),
+    ("Pets",                 "#A8DCF0", False, ["Food", "Vet/medical", "Toys", "Supplies", "Other"]),
+    ("Transportation",       "#B0D4B8", False, ["Charging", "Repairs", "Registration/license", "Public transit", "Other"]),
+    ("Travel",               "#A4C4F4", False, ["Airfare", "Alcohol", "Entertainment", "Food", "Hotels", "Spa", "Transportation", "Other"]),
+    ("Work",                 "#B8D8E8", False, ["TV", "Misc. Purchases", "Travel Expenses", "Other"]),
+    # budget_excluded=True: investments tracked separately, not in budget pool
+    ("Investments",          "#D4B8D8", True,  ["Robinhood - Preslie", "Robinhood - Sellars", "Life Insurance"]),
 ]
 
 
@@ -38,7 +41,7 @@ async def seed() -> None:
         created_cats = 0
         created_subs = 0
 
-        for cat_name, color, subcategory_names in SEED:
+        for cat_name, color, budget_excluded, subcategory_names in SEED:
             # Find or create category
             result = await db.execute(
                 select(Category).where(Category.name == cat_name)
@@ -46,10 +49,15 @@ async def seed() -> None:
             category = result.scalar_one_or_none()
 
             if category is None:
-                category = Category(id=uuid.uuid4(), name=cat_name, color=color)
+                category = Category(
+                    id=uuid.uuid4(),
+                    name=cat_name,
+                    color=color,
+                    budget_excluded=budget_excluded,
+                )
                 db.add(category)
                 await db.flush()
-                print(f"  + Category: {cat_name}")
+                print(f"  + Category: {cat_name}  (excluded={budget_excluded})")
                 created_cats += 1
             else:
                 print(f"  ~ Category already exists: {cat_name}")
