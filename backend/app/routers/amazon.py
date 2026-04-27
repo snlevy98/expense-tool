@@ -12,6 +12,7 @@ import io
 import logging
 import re
 import uuid
+from collections import Counter
 from datetime import date as date_type, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -152,6 +153,7 @@ class ApplyGroceryItem(BaseModel):
     transaction_id: uuid.UUID
     order_id: str
     category_id: uuid.UUID | None = None
+    subcategory_id: uuid.UUID | None = None
 
 
 class ApplyGroceriesRequest(BaseModel):
@@ -168,6 +170,7 @@ class ItemizeItemIn(BaseModel):
 
 class ItemizeOrderIn(BaseModel):
     parent_transaction_id: uuid.UUID
+    order_id: str
     items: list[ItemizeItemIn]
 
 
@@ -394,21 +397,12 @@ async def apply_groceries(
 ) -> dict:
     """
     Update matched grocery transactions:
-      merchant_name → "Whole Foods Market - Uptown Dallas"
-      category_id   → provided value, or the first "groceries"-named category
+      merchant_name  → "Whole Foods Market - Uptown Dallas"
+      category_id    → provided value
+      subcategory_id → provided value
     """
     if not body.matches:
         return {"updated": 0}
-
-    # Fallback grocery category (search by name)
-    cat_result = await db.execute(
-        select(Category).where(
-            func.lower(Category.name).in_(
-                ["groceries", "grocery", "food & groceries", "food and groceries"]
-            )
-        )
-    )
-    groceries_cat = cat_result.scalars().first()
 
     updated = 0
     for match in body.matches:
@@ -419,8 +413,8 @@ async def apply_groceries(
         if not txn:
             continue
         txn.merchant_name = WHOLE_FOODS_NAME
-        txn.category_id = match.category_id or (groceries_cat.id if groceries_cat else None)
-        txn.subcategory_id = None
+        txn.category_id = match.category_id
+        txn.subcategory_id = match.subcategory_id
         updated += 1
 
     await db.flush()
@@ -435,13 +429,14 @@ async def itemize_orders(
 ) -> dict:
     """
     For each order: create one transaction per item (inheriting account + date from
-    the parent Amazon transaction), then delete the parent.
+    the parent), then repurpose the parent as an "Amazon Order Taxes/Fees" row whose
+    amount is the original charge minus the sum of all item prices.
     """
     if not body.orders:
-        return {"created": 0, "deleted": 0}
+        return {"created": 0, "modified": 0}
 
     created = 0
-    deleted = 0
+    modified = 0
 
     for order in body.orders:
         result = await db.execute(
@@ -452,6 +447,7 @@ async def itemize_orders(
             logger.warning("Parent transaction %s not found — skipping", order.parent_transaction_id)
             continue
 
+        # Create one child transaction per item
         for item in order.items:
             child = Transaction(
                 id=uuid.uuid4(),
@@ -471,8 +467,27 @@ async def itemize_orders(
             db.add(child)
             created += 1
 
-        await db.delete(parent)
-        deleted += 1
+        # Repurpose parent as taxes/fees row instead of deleting it
+        items_total = sum(
+            item.price * item.quantity if item.quantity > 1 else item.price
+            for item in order.items
+        )
+        taxes_amount = max(Decimal("0"), parent.amount - items_total)
+
+        # Most common category among the confirmed items
+        cat_counts: Counter = Counter(
+            item.category_id for item in order.items if item.category_id
+        )
+        most_common_cat = cat_counts.most_common(1)[0][0] if cat_counts else None
+
+        parent.raw_description = f"Amazon Order Taxes/Fees - {order.order_id}"
+        parent.merchant_name = AMAZON_MERCHANT
+        parent.amount = taxes_amount
+        parent.category_id = most_common_cat
+        parent.subcategory_id = None
+        parent.ai_suggested_category_id = most_common_cat
+        parent.ai_suggested_subcategory_id = None
+        modified += 1
 
     await db.flush()
-    return {"created": created, "deleted": deleted}
+    return {"created": created, "modified": modified}

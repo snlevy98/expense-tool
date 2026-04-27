@@ -80,16 +80,23 @@ function SubcategorySelect({ categories, categoryId, value, onChange, disabled }
 // ─── Grocery section ──────────────────────────────────────────────────────────
 
 function GrocerySection({ matches, categories, onApply }) {
-  const defaultGroceryCat = categories.find((c) =>
-    /grocer/i.test(c.name)
-  )?.id ?? ''
+  // Default to "Necessary Expenses" category → "Groceries" subcategory
+  const defaultCat = categories.find((c) => /necessary/i.test(c.name))
+  const defaultGroceryCat = defaultCat?.id ?? ''
+  const defaultGrocerySub = defaultCat?.subcategories?.find((s) => /grocer/i.test(s.name))?.id ?? ''
 
   const [groceryCatId, setGroceryCatId] = useState(defaultGroceryCat)
+  const [grocerySubcatId, setGrocerySubcatId] = useState(defaultGrocerySub)
   const [applying, setApplying] = useState(false)
   const [done, setDone] = useState(false)
 
   const matched = matches.filter((m) => m.transaction_id)
   const unmatched = matches.filter((m) => !m.transaction_id)
+
+  const handleCatChange = (val) => {
+    setGroceryCatId(val)
+    setGrocerySubcatId('')
+  }
 
   const handleApply = async () => {
     setApplying(true)
@@ -99,6 +106,7 @@ function GrocerySection({ matches, categories, onApply }) {
           transaction_id: m.transaction_id,
           order_id: m.order_id,
           category_id: groceryCatId || null,
+          subcategory_id: grocerySubcatId || null,
         }))
       )
       setDone(true)
@@ -169,12 +177,19 @@ function GrocerySection({ matches, categories, onApply }) {
       </div>
 
       {matched.length > 0 && (
-        <div className="flex items-center gap-3 pt-2 border-t border-slate-100">
+        <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-100">
           <span className="text-sm text-slate-600">Category:</span>
           <CategorySelect
             categories={categories}
             value={groceryCatId}
-            onChange={setGroceryCatId}
+            onChange={handleCatChange}
+            disabled={applying}
+          />
+          <SubcategorySelect
+            categories={categories}
+            categoryId={groceryCatId}
+            value={grocerySubcatId}
+            onChange={setGrocerySubcatId}
             disabled={applying}
           />
           <button
@@ -224,6 +239,7 @@ function OrderCard({ order, categories, onConfirm }) {
     try {
       await onConfirm({
         parent_transaction_id: order.transaction_id,
+        order_id: order.order_id,
         items: items.map((it) => ({
           description: it.description,
           price: it.price,
