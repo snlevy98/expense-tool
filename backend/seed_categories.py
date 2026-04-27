@@ -18,19 +18,18 @@ from app.models.subcategory import Subcategory
 # ---------------------------------------------------------------------------
 
 SEED = [
-    ("Debt",            "#ef4444", ["Car Loan", "Taxes (federal)", "Taxes (state)", "Other"]),
-    ("Robinhood",       "#10b981", ["Preslie", "Sellars"]),
-    ("Entertainment",   "#8b5cf6", ["Social", "Self", "Subscriptions"]),
-    ("Groceries",       "#f59e0b", ["Grocs"]),
-    ("Gifts/Donations", "#ec4899", ["Gifts", "Charity", "Other"]),
-    ("Health",          "#06b6d4", ["Health"]),
-    ("Home",            "#84cc16", ["Home"]),
-    ("Insurance",       "#6366f1", ["Car", "Renters", "Life", "Pet"]),
-    ("Wazo",            "#f97316", ["Vet/medical", "Grooming"]),
-    ("Tesla",           "#14b8a6", ["Charging/NTTA/Self-Driving"]),
-    ("Travel",          "#a855f7", ["Misc", "Duke/Kayla", "Cancun", "Germany Deposit"]),
-    ("Rent/Utilities",  "#3b82f6", ["Rent", "Electricity", "Internet"]),
-    ("CR3 Expenses",    "#64748b", ["Amex", "VentureX", "CR3 Repayments"]),
+    # Pastel palette spanning the full color wheel for clear visual distinction
+    ("Debt",                "#FFB3B3", ["Car Loan", "Taxes (federal)", "Other"]),
+    ("Necessary Expenses",  "#B8E8C4", ["Car Insurance", "Groceries", "Health/Medical", "Home Insurance", "Home Supplies", "Rent", "Utilities"]),
+    ("For Funsies",         "#C8B4E8", ["Books", "Concerts", "DnD", "Gaming", "Fishies", "Hosting!", "Movies", "Outdoor activities", "Plant Dad", "Poker", "Sports", "Theatre", "Yoga", "Other"]),
+    ("Everyday",            "#FECFA8", ["Baking", "Bars", "Beauty", "Clothes", "Coffee Shops", "Dates", "Food Delivery", "Home Booze", "Restaurants", "Other"]),
+    ("Gifts",               "#FFB8D0", ["Gifts", "Donations", "Other"]),
+    ("Home",                "#FFF0A0", ["Dry Cleaning", "Furnishings", "Maids", "Moving", "Other"]),
+    ("Pets",                "#A8DCF0", ["Food", "Vet/medical", "Toys", "Supplies", "Other"]),
+    ("Transportation",      "#B0D4B8", ["Charging", "Repairs", "Registration/license", "Public transit", "Other"]),
+    ("Travel",              "#A4C4F4", ["Airfare", "Alcohol", "Entertainment", "Food", "Hotels", "Spa", "Transportation", "Other"]),
+    ("Work",                "#B8D8E8", ["TV", "Misc. Purchases", "Travel Expenses", "Other"]),
+    ("Investments",         "#D4B8D8", ["Robinhood - Preslie", "Robinhood - Sellars", "Life Insurance"]),
 ]
 
 
