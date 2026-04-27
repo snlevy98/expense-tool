@@ -10,6 +10,7 @@ RateLimitError is raised on 429/503 so the /enrich endpoint can return HTTP 503
 and the frontend can retry with backoff.
 """
 
+import asyncio
 import json
 import logging
 from collections import defaultdict
@@ -59,32 +60,50 @@ def _is_rate_limit(exc: Exception) -> bool:
 # Per-provider callers
 # ---------------------------------------------------------------------------
 
+_RETRY_DELAYS = (5, 15, 30)   # seconds between server-side retries before giving up
+
+
 async def _call_gemini(prompt: str) -> str:
-    """Merchant normalization provider."""
-    try:
-        resp = await _gemini.aio.models.generate_content(model=_GEMINI_MODEL, contents=prompt)
-        return resp.text.strip()
-    except Exception as exc:
-        if _is_rate_limit(exc):
-            raise RateLimitError(str(exc)) from exc
-        raise
+    """Merchant normalization provider. Retries up to 3× on rate limit before raising."""
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate((0, *_RETRY_DELAYS)):
+        if delay:
+            logger.warning("Gemini rate-limited — retrying in %ds (attempt %d)", delay, attempt + 1)
+            await asyncio.sleep(delay)
+        try:
+            resp = await _gemini.aio.models.generate_content(model=_GEMINI_MODEL, contents=prompt)
+            return resp.text.strip()
+        except Exception as exc:
+            if _is_rate_limit(exc):
+                last_exc = exc
+                continue
+            raise
+    raise RateLimitError(str(last_exc)) from last_exc
 
 
 async def _call_groq(prompt: str) -> str:
-    """Category suggestion provider. Falls back to Gemini if key not configured."""
+    """Category suggestion provider. Falls back to Gemini if key not configured.
+    Retries up to 3× on rate limit before raising."""
     if not _groq:
         return await _call_gemini(prompt)
-    try:
-        resp = await _groq.chat.completions.create(
-            model=_GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as exc:
-        if _is_rate_limit(exc):
-            raise RateLimitError(str(exc)) from exc
-        raise
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate((0, *_RETRY_DELAYS)):
+        if delay:
+            logger.warning("Groq rate-limited — retrying in %ds (attempt %d)", delay, attempt + 1)
+            await asyncio.sleep(delay)
+        try:
+            resp = await _groq.chat.completions.create(
+                model=_GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as exc:
+            if _is_rate_limit(exc):
+                last_exc = exc
+                continue
+            raise
+    raise RateLimitError(str(last_exc)) from last_exc
 
 
 async def _call_cohere(prompt: str) -> str:

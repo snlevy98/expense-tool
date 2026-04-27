@@ -5,6 +5,7 @@ Runs after import confirm (for transactions not yet enriched by the frontend)
 or on demand via POST /api/transactions/enrich-pending.
 """
 
+import asyncio
 import logging
 import uuid
 from collections import defaultdict
@@ -81,6 +82,10 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                     for txn, name in zip(regular_txns, normalized):
                         if name:
                             txn.merchant_name = name
+
+                    # Brief pause between normalization and categorization to avoid
+                    # back-to-back bursts that trigger rate limits
+                    await asyncio.sleep(2)
 
                     # Step 2: suggest categories
                     txn_dicts = [
