@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Download, RefreshCw, ChevronLeft, ChevronRight, X } from 'lucide-react'
+import { Download, RefreshCw, ChevronLeft, ChevronRight, X, Search } from 'lucide-react'
 import TransactionTable from '../components/TransactionTable'
 import EditTransactionModal from '../components/EditTransactionModal'
 import { useTransactions } from '../hooks/useTransactions'
@@ -59,6 +59,26 @@ export default function Transactions() {
 
       {/* Filters */}
       <div className="card p-4">
+        {/* Search bar */}
+        <div className="relative mb-4">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+          <input
+            type="text"
+            className="input pl-9"
+            placeholder="Search by merchant or description…"
+            value={filters.search}
+            onChange={(e) => updateFilter('search', e.target.value)}
+          />
+          {filters.search && (
+            <button
+              onClick={() => updateFilter('search', '')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
           <div>
             <label className="label">Account</label>

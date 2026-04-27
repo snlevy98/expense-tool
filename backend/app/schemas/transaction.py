@@ -35,6 +35,7 @@ class TransactionUpdate(BaseModel):
     category_id: uuid.UUID | None = None
     subcategory_id: uuid.UUID | None = None
     merchant_name: str | None = None
+    raw_description: str | None = None
     amount: Decimal | None = None
     transaction_date: date | None = None
 

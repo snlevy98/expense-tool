@@ -17,7 +17,7 @@ function SortIcon({ column, sortBy, sortDir }) {
 function SkeletonRow() {
   return (
     <tr>
-      {[...Array(7)].map((_, i) => (
+      {[...Array(8)].map((_, i) => (
         <td key={i} className="px-4 py-3">
           <div className="h-4 skeleton rounded" style={{ width: `${60 + (i * 13) % 40}%` }} />
         </td>
@@ -43,6 +43,7 @@ export default function TransactionTable({
 
   const columns = [
     { key: 'transaction_date', label: 'Date' },
+    { key: 'raw_description', label: 'Description', sortable: false },
     { key: 'merchant_name', label: 'Merchant' },
     { key: 'category_id', label: 'Category', sortable: false },
     { key: 'subcategory_id', label: 'Subcategory', sortable: false },
@@ -86,7 +87,7 @@ export default function TransactionTable({
             [...Array(8)].map((_, i) => <SkeletonRow key={i} />)
           ) : transactions.length === 0 ? (
             <tr>
-              <td colSpan={7} className="px-4 py-12 text-center text-slate-400 text-sm">
+              <td colSpan={8} className="px-4 py-12 text-center text-slate-400 text-sm">
                 No transactions found.
               </td>
             </tr>
@@ -102,9 +103,17 @@ export default function TransactionTable({
 
               return (
                 <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="table-cell text-slate-500">{formatDate(tx.transaction_date)}</td>
+                  <td className="table-cell text-slate-500 whitespace-nowrap">{formatDate(tx.transaction_date)}</td>
+                  <td className="table-cell text-slate-500 max-w-[200px]">
+                    <span
+                      className="block truncate text-xs"
+                      title={tx.raw_description}
+                    >
+                      {tx.raw_description || '—'}
+                    </span>
+                  </td>
                   <td className="table-cell font-medium text-slate-800">
-                    {tx.merchant_name || tx.description || '—'}
+                    {tx.merchant_name || '—'}
                     {tx.is_recurring && (
                       <span className="ml-2 text-xs bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded">
                         Recurring

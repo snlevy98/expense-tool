@@ -10,6 +10,7 @@ const DEFAULT_FILTERS = {
   amount_min: '',
   amount_max: '',
   is_recurring: '',
+  search: '',
 }
 
 const PAGE_SIZE = 50

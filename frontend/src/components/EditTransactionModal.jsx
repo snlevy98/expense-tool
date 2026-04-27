@@ -10,6 +10,7 @@ export default function EditTransactionModal({ transaction, onSave, onClose }) {
 
   const [form, setForm] = useState({
     merchant_name: '',
+    raw_description: '',
     transaction_date: '',
     amount: '',
     category_id: '',
@@ -23,7 +24,8 @@ export default function EditTransactionModal({ transaction, onSave, onClose }) {
   useEffect(() => {
     if (transaction) {
       setForm({
-        merchant_name: transaction.merchant_name || transaction.description || '',
+        merchant_name: transaction.merchant_name || '',
+        raw_description: transaction.raw_description || '',
         transaction_date: toInputDate(transaction.transaction_date),
         amount: transaction.amount != null ? String(Math.abs(parseFloat(transaction.amount))) : '',
         category_id: transaction.category_id || '',
@@ -55,6 +57,7 @@ export default function EditTransactionModal({ transaction, onSave, onClose }) {
         category_id: form.category_id || null,
         subcategory_id: form.subcategory_id || null,
         account_id: form.account_id || null,
+        raw_description: form.raw_description || undefined,
       })
       onClose()
     } catch (err) {
@@ -82,14 +85,25 @@ export default function EditTransactionModal({ transaction, onSave, onClose }) {
             <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">{error}</div>
           )}
 
-          <div>
-            <label className="label">Merchant / Description</label>
-            <input
-              className="input"
-              value={form.merchant_name}
-              onChange={(e) => handleChange('merchant_name', e.target.value)}
-              placeholder="Merchant name"
-            />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="label">Merchant</label>
+              <input
+                className="input"
+                value={form.merchant_name}
+                onChange={(e) => handleChange('merchant_name', e.target.value)}
+                placeholder="Merchant name"
+              />
+            </div>
+            <div>
+              <label className="label">Description</label>
+              <input
+                className="input"
+                value={form.raw_description}
+                onChange={(e) => handleChange('raw_description', e.target.value)}
+                placeholder="Original description"
+              />
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">

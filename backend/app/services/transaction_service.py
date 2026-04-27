@@ -8,7 +8,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -31,6 +31,7 @@ def _build_filters(
     uncategorized: bool | None = None,
     exclude_amazon: bool = False,
     amazon_only: bool = False,
+    search: str | None = None,
 ):
     conditions = []
     if account_id:
@@ -55,6 +56,12 @@ def _build_filters(
         conditions.append(Transaction.amount <= amount_max)
     if is_recurring is not None:
         conditions.append(Transaction.is_recurring == is_recurring)
+    if search:
+        term = f"%{search}%"
+        conditions.append(or_(
+            Transaction.merchant_name.ilike(term),
+            Transaction.raw_description.ilike(term),
+        ))
     if conditions:
         query = query.where(and_(*conditions))
     return query
@@ -107,6 +114,7 @@ async def get_transactions(
     is_recurring: bool | None = None,
     uncategorized: bool | None = None,
     exclude_amazon: bool = False,
+    search: str | None = None,
     sort_by: str = "date",
     sort_dir: str = "desc",
     skip: int = 0,
@@ -117,7 +125,7 @@ async def get_transactions(
     count_query = _build_filters(
         count_query, account_id, category_id, subcategory_id,
         date_from, date_to, amount_min, amount_max, is_recurring, uncategorized,
-        exclude_amazon=exclude_amazon,
+        exclude_amazon=exclude_amazon, search=search,
     )
     total: int = (await db.execute(count_query)).scalar_one()
 
@@ -130,7 +138,7 @@ async def get_transactions(
     query = _build_filters(
         query, account_id, category_id, subcategory_id,
         date_from, date_to, amount_min, amount_max, is_recurring, uncategorized,
-        exclude_amazon=exclude_amazon,
+        exclude_amazon=exclude_amazon, search=search,
     )
     query = _apply_sort(query, sort_by, sort_dir)
     query = query.offset(skip).limit(limit)
@@ -191,6 +199,7 @@ async def export_transactions_csv(
     amount_min: Decimal | None = None,
     amount_max: Decimal | None = None,
     is_recurring: bool | None = None,
+    search: str | None = None,
     sort_by: str = "date",
     sort_dir: str = "desc",
 ) -> str:
@@ -202,7 +211,7 @@ async def export_transactions_csv(
     )
     query = _build_filters(
         query, account_id, category_id, subcategory_id,
-        date_from, date_to, amount_min, amount_max, is_recurring
+        date_from, date_to, amount_min, amount_max, is_recurring, search=search,
     )
     query = _apply_sort(query, sort_by, sort_dir)
 
