@@ -12,7 +12,7 @@ from app.db.session import get_db
 from app.middleware.auth import require_auth
 from app.models.transaction import Transaction
 from app.schemas.transaction import EnrichPendingResponse, PaginatedTransactions, TransactionOut, TransactionUpdate
-from app.services.enrichment_service import run_background_enrichment
+from app.services.enrichment_service import is_enrichment_running, run_background_enrichment
 from app.services.transaction_service import (
     delete_transaction,
     export_transactions_csv,
@@ -153,6 +153,12 @@ async def enrich_pending(
     Returns immediately — enrichment runs as a background task.
     Capped at 500 rows per call; click again to process more after rate limits reset.
     """
+    if is_enrichment_running():
+        return EnrichPendingResponse(
+            queued=0,
+            message="Enrichment is already running — suggestions will appear shortly.",
+        )
+
     result = await db.execute(
         select(Transaction)
         .where(

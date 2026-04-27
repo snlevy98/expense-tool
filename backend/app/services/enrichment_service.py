@@ -20,6 +20,15 @@ from app.services import ai_service
 
 logger = logging.getLogger(__name__)
 
+# One enrichment run at a time — prevents duplicate AI calls when the
+# Auto-categorize button is clicked multiple times before the task finishes.
+_enrichment_lock = asyncio.Lock()
+
+
+def is_enrichment_running() -> bool:
+    """Return True if a background enrichment task is currently active."""
+    return _enrichment_lock.locked()
+
 
 def _is_amazon(raw: str) -> bool:
     upper = (raw or "").upper()
@@ -31,106 +40,116 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
     Fire-and-forget: normalize merchant names + suggest categories for unenriched rows.
 
     Opens its own DB session — safe to call with asyncio.create_task after a request
-    has flushed. On RateLimitError, commits any partial progress and returns; those
-    rows stay ai_enriched=False so the user can retry via the Auto-categorize button.
+    has flushed. Acquires a module-level lock so concurrent calls (e.g. from spam-
+    clicking Auto-categorize) skip immediately rather than making duplicate AI calls.
+    On RateLimitError, commits any partial progress and returns; those rows stay
+    ai_enriched=False so the user can retry later.
     """
     if not transactions:
         return
 
+    if _enrichment_lock.locked():
+        logger.info(
+            "Enrichment already in progress — skipping duplicate task (%d txns)",
+            len(transactions),
+        )
+        return
+
     txn_ids = [t.id for t in transactions]
-    logger.info("Background enrichment starting for %d transactions", len(txn_ids))
 
-    try:
-        async with AsyncSessionLocal() as db:
-            # Re-fetch with our own session (caller's session may already be closed)
-            result = await db.execute(
-                select(Transaction).where(Transaction.id.in_(txn_ids))
-            )
-            db_txns = result.scalars().all()
-            if not db_txns:
-                return
-
-            # Load categories
-            cat_result = await db.execute(
-                select(Category).options(selectinload(Category.subcategories))
-            )
-            categories = cat_result.scalars().all()
-            category_dicts = [
-                {
-                    "id": str(c.id),
-                    "name": c.name,
-                    "subcategories": [{"id": str(s.id), "name": s.name} for s in c.subcategories],
-                }
-                for c in categories
-            ]
-
-            examples_text = await _build_examples_text(db, category_dicts)
-
-            amazon_txns = [t for t in db_txns if _is_amazon(t.raw_description)]
-            regular_txns = [t for t in db_txns if not _is_amazon(t.raw_description)]
-
-            # Amazon: normalize name, mark enriched — no AI category suggestion needed
-            for t in amazon_txns:
-                t.merchant_name = "Amazon"
-                t.ai_enriched = True
-
-            if regular_txns:
-                try:
-                    # Step 1: normalize merchant names
-                    descriptions = [t.raw_description for t in regular_txns]
-                    normalized = await ai_service.normalize_merchant_names_batch(descriptions)
-                    for txn, name in zip(regular_txns, normalized):
-                        if name:
-                            txn.merchant_name = name
-
-                    # Brief pause between normalization and categorization to avoid
-                    # back-to-back bursts that trigger rate limits
-                    await asyncio.sleep(2)
-
-                    # Step 2: suggest categories
-                    txn_dicts = [
-                        {
-                            "index": i,
-                            "raw_description": t.raw_description,
-                            "merchant_name": t.merchant_name,
-                            "amount": str(t.amount),
-                        }
-                        for i, t in enumerate(regular_txns)
-                    ]
-                    suggestions = await ai_service.suggest_categories(
-                        txn_dicts, category_dicts, examples_text=examples_text
-                    )
-                    s_map = {s["index"]: s for s in suggestions if isinstance(s, dict)}
-
-                    for i, txn in enumerate(regular_txns):
-                        s = s_map.get(i, {})
-                        try:
-                            if s.get("category_id"):
-                                txn.ai_suggested_category_id = uuid.UUID(s["category_id"])
-                            if s.get("subcategory_id"):
-                                txn.ai_suggested_subcategory_id = uuid.UUID(s["subcategory_id"])
-                        except (ValueError, AttributeError):
-                            pass
-                        txn.ai_enriched = True
-
-                except ai_service.RateLimitError:
-                    logger.warning(
-                        "Background enrichment rate-limited — %d rows left unenriched",
-                        len(regular_txns),
-                    )
-                    # Commit whatever Amazon progress we made; regular rows stay ai_enriched=False
-                    await db.commit()
+    async with _enrichment_lock:
+        logger.info("Background enrichment starting for %d transactions", len(txn_ids))
+        try:
+            async with AsyncSessionLocal() as db:
+                # Re-fetch with our own session (caller's session may already be closed)
+                result = await db.execute(
+                    select(Transaction).where(Transaction.id.in_(txn_ids))
+                )
+                db_txns = result.scalars().all()
+                if not db_txns:
                     return
 
-            await db.commit()
-            logger.info(
-                "Background enrichment complete: %d regular, %d Amazon",
-                len(regular_txns),
-                len(amazon_txns),
-            )
+                # Load categories
+                cat_result = await db.execute(
+                    select(Category).options(selectinload(Category.subcategories))
+                )
+                categories = cat_result.scalars().all()
+                category_dicts = [
+                    {
+                        "id": str(c.id),
+                        "name": c.name,
+                        "subcategories": [{"id": str(s.id), "name": s.name} for s in c.subcategories],
+                    }
+                    for c in categories
+                ]
 
-    except Exception:
-        logger.exception("Background enrichment failed")
+                examples_text = await _build_examples_text(db, category_dicts)
+
+                amazon_txns = [t for t in db_txns if _is_amazon(t.raw_description)]
+                regular_txns = [t for t in db_txns if not _is_amazon(t.raw_description)]
+
+                # Amazon: normalize name, mark enriched — no AI category suggestion needed
+                for t in amazon_txns:
+                    t.merchant_name = "Amazon"
+                    t.ai_enriched = True
+
+                if regular_txns:
+                    try:
+                        # Step 1: normalize merchant names
+                        descriptions = [t.raw_description for t in regular_txns]
+                        normalized = await ai_service.normalize_merchant_names_batch(descriptions)
+                        for txn, name in zip(regular_txns, normalized):
+                            if name:
+                                txn.merchant_name = name
+
+                        # Brief pause between normalization and categorization to avoid
+                        # back-to-back bursts that trigger rate limits
+                        await asyncio.sleep(2)
+
+                        # Step 2: suggest categories
+                        txn_dicts = [
+                            {
+                                "index": i,
+                                "raw_description": t.raw_description,
+                                "merchant_name": t.merchant_name,
+                                "amount": str(t.amount),
+                            }
+                            for i, t in enumerate(regular_txns)
+                        ]
+                        suggestions = await ai_service.suggest_categories(
+                            txn_dicts, category_dicts, examples_text=examples_text
+                        )
+                        s_map = {s["index"]: s for s in suggestions if isinstance(s, dict)}
+
+                        for i, txn in enumerate(regular_txns):
+                            s = s_map.get(i, {})
+                            try:
+                                if s.get("category_id"):
+                                    txn.ai_suggested_category_id = uuid.UUID(s["category_id"])
+                                if s.get("subcategory_id"):
+                                    txn.ai_suggested_subcategory_id = uuid.UUID(s["subcategory_id"])
+                            except (ValueError, AttributeError):
+                                pass
+                            txn.ai_enriched = True
+
+                    except ai_service.RateLimitError:
+                        logger.warning(
+                            "Background enrichment rate-limited — %d rows left unenriched",
+                            len(regular_txns),
+                        )
+                        # Commit whatever Amazon progress we made; regular rows stay ai_enriched=False
+                        await db.commit()
+                        return
+
+                await db.commit()
+                logger.info(
+                    "Background enrichment complete: %d regular, %d Amazon",
+                    len(regular_txns),
+                    len(amazon_txns),
+                )
+
+        except Exception:
+            logger.exception("Background enrichment failed")
 
 
 async def _build_examples_text(db, category_dicts: list[dict]) -> str:

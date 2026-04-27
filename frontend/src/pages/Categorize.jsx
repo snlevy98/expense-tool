@@ -237,7 +237,7 @@ export default function Categorize() {
           {enrichResult.error
             ? <><AlertCircle size={14} /> {enrichResult.error}</>
             : enrichResult.queued === 0
-            ? 'All transactions already have AI suggestions.'
+            ? enrichResult.message || 'All transactions already have AI suggestions.'
             : <><Loader2 size={14} className="animate-spin" /> AI enrichment started for {enrichResult.queued} transaction{enrichResult.queued !== 1 ? 's' : ''} — suggestions will appear shortly.</>}
         </div>
       )}
