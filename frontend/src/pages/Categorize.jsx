@@ -181,20 +181,20 @@ export default function Categorize() {
   }, [fetchPage])
 
   // Poll enrich-status every 15s; always check on mount
-  useEffect(() => {
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const { data } = await api.get('/api/transactions/enrich-status')
-        if (!cancelled) setEnrichStatus(data)
-      } catch {
-        // silently ignore — status is best-effort
-      }
+  const pollEnrichStatus = useCallback(async () => {
+    try {
+      const { data } = await api.get('/api/transactions/enrich-status')
+      setEnrichStatus(data)
+    } catch (err) {
+      console.warn('Failed to fetch enrich status:', err?.response?.status, err?.message)
     }
-    poll()
-    const interval = setInterval(poll, 15000)
-    return () => { cancelled = true; clearInterval(interval) }
   }, [])
+
+  useEffect(() => {
+    pollEnrichStatus()
+    const interval = setInterval(pollEnrichStatus, 15000)
+    return () => clearInterval(interval)
+  }, [pollEnrichStatus])
 
   const handleCategorized = useCallback(
     (id) => {
@@ -212,6 +212,8 @@ export default function Categorize() {
       const { data } = await api.post('/api/transactions/enrich-pending')
       setEnrichResult({ queued: data.queued, message: data.message })
       if (data.queued > 0) {
+        // Poll immediately so the progress banner appears right away
+        pollEnrichStatus()
         setTimeout(() => fetchPage(), 4000)
       }
     } catch (err) {
@@ -219,7 +221,7 @@ export default function Categorize() {
     } finally {
       setEnriching(false)
     }
-  }, [fetchPage])
+  }, [fetchPage, pollEnrichStatus])
 
   const isEmpty = !loading && transactions.length === 0
 
