@@ -34,3 +34,8 @@ export const deleteSubcategory = async (id) => {
   const { data } = await api.delete(`/api/subcategories/${id}`)
   return data
 }
+
+export const moveSubcategory = async (id, direction) => {
+  const { data } = await api.put(`/api/subcategories/${id}/move?direction=${direction}`)
+  return data
+}

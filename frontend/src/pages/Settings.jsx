@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, Pencil, Trash2, Check, X, ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight, ChevronUp, Check, Lock, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useAppStore } from '../store/appStore'
 import { useCategories } from '../hooks/useCategories'
 import {
@@ -8,6 +8,7 @@ import {
 import {
   createCategory, updateCategory, deleteCategory,
   createSubcategory, updateSubcategory, deleteSubcategory,
+  moveSubcategory,
 } from '../services/categoryService'
 
 const ACCOUNT_TYPES = ['checking', 'savings', 'credit_card', 'investment', 'cash', 'other']
@@ -143,13 +144,93 @@ function AddAccountRow({ onAdd }) {
   )
 }
 
-function CategoryRow({ category, onUpdateCat, onDeleteCat, onAddSub, onUpdateSub, onDeleteSub }) {
+/**
+ * A single subcategory row with edit, delete, and up/down reorder buttons.
+ * isFirst / isLast disable the respective move buttons at the list boundaries.
+ */
+function SubcategoryRow({ sub, isFirst, isLast, onUpdate, onDelete, onMove }) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(sub.name)
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await onUpdate(sub.id, { name })
+      setEditing(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      {/* Reorder arrows */}
+      <div className="flex flex-col shrink-0">
+        <button
+          onClick={() => onMove(sub.id, 'up')}
+          disabled={isFirst}
+          title="Move up"
+          className={`p-0.5 rounded transition-colors ${isFirst ? 'text-slate-200 cursor-not-allowed' : 'text-slate-400 hover:text-indigo-500 hover:bg-indigo-50'}`}
+        >
+          <ChevronUp size={12} />
+        </button>
+        <button
+          onClick={() => onMove(sub.id, 'down')}
+          disabled={isLast}
+          title="Move down"
+          className={`p-0.5 rounded transition-colors ${isLast ? 'text-slate-200 cursor-not-allowed' : 'text-slate-400 hover:text-indigo-500 hover:bg-indigo-50'}`}
+        >
+          <ChevronDown size={12} />
+        </button>
+      </div>
+
+      <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
+
+      {editing ? (
+        <>
+          <input
+            className="input py-0.5 text-sm flex-1 max-w-xs"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSave()}
+            autoFocus
+          />
+          <button onClick={handleSave} disabled={saving} className="p-1 text-emerald-600 hover:bg-emerald-50 rounded">
+            <Check size={13} />
+          </button>
+          <button onClick={() => { setName(sub.name); setEditing(false) }} className="p-1 text-slate-400 hover:bg-slate-100 rounded">
+            <X size={13} />
+          </button>
+        </>
+      ) : (
+        <>
+          <span className="text-sm text-slate-700 flex-1">{sub.name}</span>
+          <button onClick={() => { setName(sub.name); setEditing(true) }} className="p-1 text-slate-400 hover:text-indigo-600 rounded">
+            <Pencil size={12} />
+          </button>
+          <button onClick={() => onDelete(sub.id)} className="p-1 text-slate-400 hover:text-red-500 rounded">
+            <Trash2 size={12} />
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * A single expandable category row.
+ * `protected` = true for budget_excluded categories (Income, Investments) — no delete button shown.
+ */
+function CategoryRow({ category, protected: isProtected, onUpdateCat, onDeleteCat, onAddSub, onUpdateSub, onDeleteSub, onMoveSub }) {
   const [expanded, setExpanded] = useState(false)
   const [editingCat, setEditingCat] = useState(false)
   const [catForm, setCatForm] = useState({ name: category.name, color: category.color || '#6366f1' })
   const [newSubName, setNewSubName] = useState('')
   const [addingSub, setAddingSub] = useState(false)
   const [saving, setSaving] = useState(false)
+
+  const subcategories = category.subcategories ?? []
 
   const handleSaveCat = async () => {
     setSaving(true)
@@ -189,25 +270,49 @@ function CategoryRow({ category, onUpdateCat, onDeleteCat, onAddSub, onUpdateSub
           <div className="flex items-center gap-3 flex-1">
             <span className="w-4 h-4 rounded-full shrink-0" style={{ backgroundColor: category.color || '#94a3b8' }} />
             <span className="font-medium text-slate-800">{category.name}</span>
-            <span className="text-xs text-slate-400">{(category.subcategories ?? []).length} subcategories</span>
+            <span className="text-xs text-slate-400">{subcategories.length} subcategories</span>
           </div>
         )}
         {!editingCat && (
           <div className="flex gap-1">
-            <button onClick={() => { setCatForm({ name: category.name, color: category.color || '#6366f1' }); setEditingCat(true) }} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded">
+            <button
+              onClick={() => { setCatForm({ name: category.name, color: category.color || '#6366f1' }); setEditingCat(true) }}
+              className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded"
+              title="Edit category"
+            >
               <Pencil size={14} />
             </button>
-            <button onClick={() => onDeleteCat(category.id)} className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded">
-              <Trash2 size={14} />
-            </button>
+            {isProtected ? (
+              <span
+                title="System category — cannot be deleted"
+                className="p-1.5 text-slate-300 cursor-not-allowed"
+              >
+                <Lock size={14} />
+              </span>
+            ) : (
+              <button onClick={() => onDeleteCat(category.id)} className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded" title="Delete category">
+                <Trash2 size={14} />
+              </button>
+            )}
           </div>
         )}
       </div>
 
       {expanded && (
         <div className="border-t border-slate-100 bg-slate-50 px-8 py-3 space-y-2">
-          {(category.subcategories ?? []).map((sub) => (
-            <SubcategoryRow key={sub.id} sub={sub} onUpdate={onUpdateSub} onDelete={onDeleteSub} />
+          {subcategories.length === 0 && (
+            <p className="text-xs text-slate-400 italic">No subcategories yet.</p>
+          )}
+          {subcategories.map((sub, i) => (
+            <SubcategoryRow
+              key={sub.id}
+              sub={sub}
+              isFirst={i === 0}
+              isLast={i === subcategories.length - 1}
+              onUpdate={onUpdateSub}
+              onDelete={onDeleteSub}
+              onMove={onMoveSub}
+            />
           ))}
           <div className="flex items-center gap-2 mt-2">
             <input
@@ -227,41 +332,6 @@ function CategoryRow({ category, onUpdateCat, onDeleteCat, onAddSub, onUpdateSub
   )
 }
 
-function SubcategoryRow({ sub, onUpdate, onDelete }) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(sub.name)
-  const [saving, setSaving] = useState(false)
-
-  const handleSave = async () => {
-    setSaving(true)
-    try {
-      await onUpdate(sub.id, { name })
-      setEditing(false)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="flex items-center gap-2">
-      <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
-      {editing ? (
-        <>
-          <input className="input py-0.5 text-sm flex-1 max-w-xs" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSave()} autoFocus />
-          <button onClick={handleSave} disabled={saving} className="p-1 text-emerald-600 hover:bg-emerald-50 rounded"><Check size={13} /></button>
-          <button onClick={() => setEditing(false)} className="p-1 text-slate-400 hover:bg-slate-100 rounded"><X size={13} /></button>
-        </>
-      ) : (
-        <>
-          <span className="text-sm text-slate-700 flex-1">{sub.name}</span>
-          <button onClick={() => { setName(sub.name); setEditing(true) }} className="p-1 text-slate-400 hover:text-indigo-600 rounded"><Pencil size={12} /></button>
-          <button onClick={() => onDelete(sub.id)} className="p-1 text-slate-400 hover:text-red-500 rounded"><Trash2 size={12} /></button>
-        </>
-      )}
-    </div>
-  )
-}
-
 export default function Settings() {
   const accounts = useAppStore((s) => s.accounts)
   const fetchAccounts = useAppStore((s) => s.fetchAccounts)
@@ -271,6 +341,10 @@ export default function Settings() {
   const [newCatForm, setNewCatForm] = useState({ name: '', color: '#6366f1' })
   const [addingCat, setAddingCat] = useState(false)
   const [error, setError] = useState(null)
+
+  // Split categories into regular and system (budget_excluded)
+  const regularCats = categories.filter((c) => !c.budget_excluded)
+  const systemCats = categories.filter((c) => c.budget_excluded)
 
   const handleAddAccount = async (data) => {
     await createAccount({ ...data, is_active: true })
@@ -324,6 +398,21 @@ export default function Settings() {
     await fetchCategories()
   }
 
+  const handleMoveSubcategory = async (id, direction) => {
+    await moveSubcategory(id, direction)
+    await fetchCategories()
+  }
+
+  // Shared props for all CategoryRow instances
+  const catRowProps = {
+    onUpdateCat: handleUpdateCategory,
+    onDeleteCat: handleDeleteCategory,
+    onAddSub: handleAddSubcategory,
+    onUpdateSub: handleUpdateSubcategory,
+    onDeleteSub: handleDeleteSubcategory,
+    onMoveSub: handleMoveSubcategory,
+  }
+
   return (
     <div className="space-y-8">
       <div>
@@ -363,26 +452,21 @@ export default function Settings() {
         </table>
       </div>
 
-      {/* Categories Section */}
+      {/* Regular Categories Section */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="font-semibold text-slate-700 text-base">Categories</h2>
+          <div>
+            <h2 className="font-semibold text-slate-700 text-base">Categories</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Budget categories tracked in your spending summary</p>
+          </div>
         </div>
 
         <div className="space-y-2 mb-4">
-          {categories.length === 0 && (
+          {regularCats.length === 0 && (
             <p className="text-slate-400 text-sm">No categories yet. Add one below.</p>
           )}
-          {categories.map((cat) => (
-            <CategoryRow
-              key={cat.id}
-              category={cat}
-              onUpdateCat={handleUpdateCategory}
-              onDeleteCat={handleDeleteCategory}
-              onAddSub={handleAddSubcategory}
-              onUpdateSub={handleUpdateSubcategory}
-              onDeleteSub={handleDeleteSubcategory}
-            />
+          {regularCats.map((cat) => (
+            <CategoryRow key={cat.id} category={cat} protected={false} {...catRowProps} />
           ))}
         </div>
 
@@ -414,6 +498,27 @@ export default function Settings() {
           </div>
         </div>
       </div>
+
+      {/* System Categories Section (Income, Investments) */}
+      {systemCats.length > 0 && (
+        <div className="card border-slate-200">
+          <div className="flex items-start gap-2 mb-4">
+            <Lock size={15} className="text-slate-400 mt-0.5 shrink-0" />
+            <div>
+              <h2 className="font-semibold text-slate-700 text-base">System Categories</h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                These categories are used by the budget engine and cannot be deleted. You can rename them, change their colour, and add subcategories.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {systemCats.map((cat) => (
+              <CategoryRow key={cat.id} category={cat} protected={true} {...catRowProps} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

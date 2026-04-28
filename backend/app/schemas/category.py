@@ -23,6 +23,7 @@ class CategoryOut(BaseModel):
     name: str
     color: str
     is_active: bool
+    budget_excluded: bool = False
     subcategories: list[SubcategoryOut] = []
     created_at: datetime
     updated_at: datetime

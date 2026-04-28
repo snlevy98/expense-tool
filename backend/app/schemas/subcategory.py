@@ -12,6 +12,7 @@ class SubcategoryCreate(BaseModel):
 class SubcategoryUpdate(BaseModel):
     name: str | None = None
     is_active: bool | None = None
+    sort_order: int | None = None
 
 
 class SubcategoryOut(BaseModel):
@@ -21,5 +22,6 @@ class SubcategoryOut(BaseModel):
     category_id: uuid.UUID
     name: str
     is_active: bool
+    sort_order: int = 0
     created_at: datetime
     updated_at: datetime

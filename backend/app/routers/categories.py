@@ -25,6 +25,9 @@ async def list_categories(
         .options(selectinload(Category.subcategories))
     )
     categories = result.scalars().all()
+    # Sort subcategories by sort_order within each category
+    for cat in categories:
+        cat.subcategories.sort(key=lambda s: (s.sort_order, s.created_at))
     return list(categories)
 
 
@@ -80,6 +83,11 @@ async def delete_category(
     category = result.scalar_one_or_none()
     if not category:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+    if category.budget_excluded:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"'{category.name}' is a system category and cannot be deleted.",
+        )
 
     # 1. Null out category_id and subcategory_id on all affected transactions
     await db.execute(
