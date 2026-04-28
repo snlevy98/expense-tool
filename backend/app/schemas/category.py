@@ -18,6 +18,7 @@ class CategoryCreate(BaseModel):
 class CategoryUpdate(BaseModel):
     name: str | None = None
     color: str | None = None
+    budget_excluded: bool | None = None
 
 
 class CategoryOut(BaseModel):

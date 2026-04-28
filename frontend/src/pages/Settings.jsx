@@ -243,7 +243,7 @@ function SubcategoryList({ categoryId, subcategories, onUpdateSub, onDeleteSub, 
 function CategoryRow({ category, protected: isProtected, onUpdateCat, onDeleteCat, onAddSub, onUpdateSub, onDeleteSub, onReorderSubs }) {
   const [expanded, setExpanded] = useState(false)
   const [editingCat, setEditingCat] = useState(false)
-  const [catForm, setCatForm] = useState({ name: category.name, color: category.color || '#6366f1' })
+  const [catForm, setCatForm] = useState({ name: category.name, color: category.color || '#6366f1', budget_excluded: category.budget_excluded ?? false })
   const [newSubName, setNewSubName] = useState('')
   const [addingSub, setAddingSub] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -268,9 +268,18 @@ function CategoryRow({ category, protected: isProtected, onUpdateCat, onDeleteCa
           {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
         </button>
         {editingCat ? (
-          <div className="flex items-center gap-2 flex-1">
+          <div className="flex items-center gap-2 flex-1 flex-wrap">
             <input type="color" value={catForm.color} onChange={(e) => setCatForm((p) => ({ ...p, color: e.target.value }))} className="w-8 h-8 rounded cursor-pointer border border-slate-200" />
             <input className="input py-1 text-sm flex-1 max-w-xs" value={catForm.name} onChange={(e) => setCatForm((p) => ({ ...p, name: e.target.value }))} autoFocus />
+            <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none whitespace-nowrap">
+              <input
+                type="checkbox"
+                checked={catForm.budget_excluded}
+                onChange={(e) => setCatForm((p) => ({ ...p, budget_excluded: e.target.checked }))}
+                className="w-3.5 h-3.5 rounded accent-indigo-600"
+              />
+              Exclude from budget
+            </label>
             <button onClick={handleSaveCat} disabled={saving} className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded"><Check size={15} /></button>
             <button onClick={() => setEditingCat(false)} className="p-1.5 text-slate-400 hover:bg-slate-100 rounded"><X size={15} /></button>
           </div>
@@ -279,12 +288,15 @@ function CategoryRow({ category, protected: isProtected, onUpdateCat, onDeleteCa
             <span className="w-4 h-4 rounded-full shrink-0" style={{ backgroundColor: category.color || '#94a3b8' }} />
             <span className="font-medium text-slate-800">{category.name}</span>
             <span className="text-xs text-slate-400">{(category.subcategories ?? []).length} subcategories</span>
+            {category.budget_excluded && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-medium">excluded</span>
+            )}
           </div>
         )}
         {!editingCat && (
           <div className="flex gap-1">
             <button
-              onClick={() => { setCatForm({ name: category.name, color: category.color || '#6366f1' }); setEditingCat(true) }}
+              onClick={() => { setCatForm({ name: category.name, color: category.color || '#6366f1', budget_excluded: category.budget_excluded ?? false }); setEditingCat(true) }}
               className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded"
               title="Edit category"
             >
