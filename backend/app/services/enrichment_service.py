@@ -102,7 +102,7 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                     # Each committed chunk is fully enriched; if a rate limit fires mid-run
                     # the already-committed chunks are safe and only the remaining ones
                     # stay ai_enriched=False for the next retry.
-                    CHUNK = ai_service._NORMALIZE_CHUNK  # 40 — fits in one API call each step
+                    CHUNK = ai_service._NORMALIZE_CHUNK  # 20 — fits in one API call each step
                     enriched_count = 0
 
                     for chunk_start in range(0, len(regular_txns), CHUNK):
@@ -116,8 +116,8 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                                 if name:
                                     txn.merchant_name = name
 
-                            # Brief pause between normalization and categorization
-                            await asyncio.sleep(1)
+                            # Pause between normalization and categorization
+                            await asyncio.sleep(3)
 
                             # Step 2: suggest categories for this chunk (local indices 0..N-1)
                             txn_dicts = [
@@ -154,9 +154,10 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                                 len(regular_txns),
                             )
 
-                            # Pause between chunks to ease rate-limit pressure
+                            # Pause between chunks — 12s keeps Gemini under 5 RPM
+                            # (one normalize call per chunk; 60s / 5 RPM = 12s minimum gap)
                             if chunk_start + CHUNK < len(regular_txns):
-                                await asyncio.sleep(2)
+                                await asyncio.sleep(12)
 
                         except ai_service.RateLimitError:
                             logger.warning(
