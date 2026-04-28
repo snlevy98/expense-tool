@@ -106,3 +106,9 @@ class EnrichResponse(BaseModel):
 class EnrichPendingResponse(BaseModel):
     queued: int
     message: str
+
+
+class EnrichStatusResponse(BaseModel):
+    running: bool
+    processed: int
+    total: int

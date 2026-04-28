@@ -150,6 +150,9 @@ export default function Categorize() {
   const [enriching, setEnriching] = useState(false)
   const [enrichResult, setEnrichResult] = useState(null)
 
+  // Background enrichment progress polling
+  const [enrichStatus, setEnrichStatus] = useState({ running: false, processed: 0, total: 0 })
+
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
   const fetchPage = useCallback(async () => {
@@ -176,6 +179,22 @@ export default function Categorize() {
   useEffect(() => {
     fetchPage()
   }, [fetchPage])
+
+  // Poll enrich-status every 15s; always check on mount
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const { data } = await api.get('/api/transactions/enrich-status')
+        if (!cancelled) setEnrichStatus(data)
+      } catch {
+        // silently ignore — status is best-effort
+      }
+    }
+    poll()
+    const interval = setInterval(poll, 15000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [])
 
   const handleCategorized = useCallback(
     (id) => {
@@ -236,6 +255,35 @@ export default function Categorize() {
           </button>
         </div>
       </div>
+
+      {/* Background enrichment progress banner */}
+      {enrichStatus.running && (
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg bg-indigo-50 text-indigo-700 text-sm font-medium">
+          <div className="flex items-center gap-2">
+            <Loader2 size={14} className="animate-spin shrink-0" />
+            <span>
+              Enriching in background —{' '}
+              <span className="font-semibold">{enrichStatus.processed}</span>
+              {' / '}
+              <span className="font-semibold">{enrichStatus.total}</span>
+              {' transactions processed'}
+            </span>
+          </div>
+          {enrichStatus.total > 0 && (
+            <div className="flex items-center gap-2 shrink-0">
+              <div className="w-32 h-1.5 bg-indigo-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+                  style={{ width: `${Math.round((enrichStatus.processed / enrichStatus.total) * 100)}%` }}
+                />
+              </div>
+              <span className="text-xs tabular-nums">
+                {Math.round((enrichStatus.processed / enrichStatus.total) * 100)}%
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {enrichResult && (
         <div className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium ${

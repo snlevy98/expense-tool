@@ -24,10 +24,23 @@ logger = logging.getLogger(__name__)
 # Auto-categorize button is clicked multiple times before the task finishes.
 _enrichment_lock = asyncio.Lock()
 
+# Progress counters — updated during a run, reset when a new run starts.
+_enrichment_total: int = 0
+_enrichment_processed: int = 0
+
 
 def is_enrichment_running() -> bool:
     """Return True if a background enrichment task is currently active."""
     return _enrichment_lock.locked()
+
+
+def get_enrichment_progress() -> dict:
+    """Return current enrichment progress (safe to call from any context)."""
+    return {
+        "running": _enrichment_lock.locked(),
+        "processed": _enrichment_processed,
+        "total": _enrichment_total,
+    }
 
 
 def _is_amazon(raw: str) -> bool:
@@ -58,6 +71,9 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
     txn_ids = [t.id for t in transactions]
 
     async with _enrichment_lock:
+        global _enrichment_total, _enrichment_processed
+        _enrichment_total = len(txn_ids)
+        _enrichment_processed = 0
         logger.info("Background enrichment starting for %d transactions", len(txn_ids))
         try:
             async with AsyncSessionLocal() as db:
@@ -96,6 +112,7 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                 # Commit Amazon rows immediately so they're never lost
                 if amazon_txns:
                     await db.commit()
+                    _enrichment_processed += len(amazon_txns)
 
                 if regular_txns:
                     # Process chunk-by-chunk: normalize → suggest → mark enriched → commit.
@@ -148,6 +165,7 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                             # Commit this chunk — fully enriched rows are now persisted
                             await db.commit()
                             enriched_count += len(chunk)
+                            _enrichment_processed += len(chunk)
                             logger.info(
                                 "Enrichment chunk committed: %d/%d regular txns done",
                                 enriched_count,

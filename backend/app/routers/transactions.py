@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.middleware.auth import require_auth
 from app.models.transaction import Transaction
-from app.schemas.transaction import EnrichPendingResponse, PaginatedTransactions, TransactionOut, TransactionUpdate
-from app.services.enrichment_service import is_enrichment_running, run_background_enrichment
+from app.schemas.transaction import EnrichPendingResponse, EnrichStatusResponse, PaginatedTransactions, TransactionOut, TransactionUpdate
+from app.services.enrichment_service import get_enrichment_progress, is_enrichment_running, run_background_enrichment
 from app.services.transaction_service import (
     delete_transaction,
     export_transactions_csv,
@@ -180,3 +180,11 @@ async def enrich_pending(
         queued=count,
         message=f"Enrichment started for {count} transaction{'s' if count != 1 else ''}.",
     )
+
+
+@router.get("/enrich-status", response_model=EnrichStatusResponse)
+async def enrich_status(
+    auth: dict = Depends(require_auth),
+) -> EnrichStatusResponse:
+    """Return current background enrichment progress (no DB access needed)."""
+    return EnrichStatusResponse(**get_enrichment_progress())
