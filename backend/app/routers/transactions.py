@@ -23,6 +23,14 @@ from app.services.transaction_service import (
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
+@router.get("/enrich-status", response_model=EnrichStatusResponse)
+async def enrich_status(
+    auth: dict = Depends(require_auth),
+) -> EnrichStatusResponse:
+    """Return current background enrichment progress (no DB access needed)."""
+    return EnrichStatusResponse(**get_enrichment_progress())
+
+
 @router.get("/uncategorized-count")
 async def uncategorized_count(
     exclude_amazon: bool = Query(False),
@@ -180,11 +188,3 @@ async def enrich_pending(
         queued=count,
         message=f"Enrichment started for {count} transaction{'s' if count != 1 else ''}.",
     )
-
-
-@router.get("/enrich-status", response_model=EnrichStatusResponse)
-async def enrich_status(
-    auth: dict = Depends(require_auth),
-) -> EnrichStatusResponse:
-    """Return current background enrichment progress (no DB access needed)."""
-    return EnrichStatusResponse(**get_enrichment_progress())
