@@ -93,55 +93,81 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                     t.merchant_name = "Amazon"
                     t.ai_enriched = True
 
+                # Commit Amazon rows immediately so they're never lost
+                if amazon_txns:
+                    await db.commit()
+
                 if regular_txns:
-                    try:
-                        # Step 1: normalize merchant names
-                        descriptions = [t.raw_description for t in regular_txns]
-                        normalized = await ai_service.normalize_merchant_names_batch(descriptions)
-                        for txn, name in zip(regular_txns, normalized):
-                            if name:
-                                txn.merchant_name = name
+                    # Process chunk-by-chunk: normalize → suggest → mark enriched → commit.
+                    # Each committed chunk is fully enriched; if a rate limit fires mid-run
+                    # the already-committed chunks are safe and only the remaining ones
+                    # stay ai_enriched=False for the next retry.
+                    CHUNK = ai_service._NORMALIZE_CHUNK  # 40 — fits in one API call each step
+                    enriched_count = 0
 
-                        # Brief pause between normalization and categorization to avoid
-                        # back-to-back bursts that trigger rate limits
-                        await asyncio.sleep(2)
+                    for chunk_start in range(0, len(regular_txns), CHUNK):
+                        chunk = regular_txns[chunk_start : chunk_start + CHUNK]
 
-                        # Step 2: suggest categories
-                        txn_dicts = [
-                            {
-                                "index": i,
-                                "raw_description": t.raw_description,
-                                "merchant_name": t.merchant_name,
-                                "amount": str(t.amount),
-                            }
-                            for i, t in enumerate(regular_txns)
-                        ]
-                        suggestions = await ai_service.suggest_categories(
-                            txn_dicts, category_dicts, examples_text=examples_text
-                        )
-                        s_map = {s["index"]: s for s in suggestions if isinstance(s, dict)}
+                        try:
+                            # Step 1: normalize merchant names for this chunk
+                            descriptions = [t.raw_description for t in chunk]
+                            normalized = await ai_service.normalize_merchant_names_batch(descriptions)
+                            for txn, name in zip(chunk, normalized):
+                                if name:
+                                    txn.merchant_name = name
 
-                        for i, txn in enumerate(regular_txns):
-                            s = s_map.get(i, {})
-                            try:
-                                if s.get("category_id"):
-                                    txn.ai_suggested_category_id = uuid.UUID(s["category_id"])
-                                if s.get("subcategory_id"):
-                                    txn.ai_suggested_subcategory_id = uuid.UUID(s["subcategory_id"])
-                            except (ValueError, AttributeError):
-                                pass
-                            txn.ai_enriched = True
+                            # Brief pause between normalization and categorization
+                            await asyncio.sleep(1)
 
-                    except ai_service.RateLimitError:
-                        logger.warning(
-                            "Background enrichment rate-limited — %d rows left unenriched",
-                            len(regular_txns),
-                        )
-                        # Commit whatever Amazon progress we made; regular rows stay ai_enriched=False
-                        await db.commit()
-                        return
+                            # Step 2: suggest categories for this chunk (local indices 0..N-1)
+                            txn_dicts = [
+                                {
+                                    "index": i,
+                                    "raw_description": t.raw_description,
+                                    "merchant_name": t.merchant_name,
+                                    "amount": str(t.amount),
+                                }
+                                for i, t in enumerate(chunk)
+                            ]
+                            suggestions = await ai_service.suggest_categories(
+                                txn_dicts, category_dicts, examples_text=examples_text
+                            )
+                            s_map = {s["index"]: s for s in suggestions if isinstance(s, dict)}
 
-                await db.commit()
+                            for i, txn in enumerate(chunk):
+                                s = s_map.get(i, {})
+                                try:
+                                    if s.get("category_id"):
+                                        txn.ai_suggested_category_id = uuid.UUID(s["category_id"])
+                                    if s.get("subcategory_id"):
+                                        txn.ai_suggested_subcategory_id = uuid.UUID(s["subcategory_id"])
+                                except (ValueError, AttributeError):
+                                    pass
+                                txn.ai_enriched = True
+
+                            # Commit this chunk — fully enriched rows are now persisted
+                            await db.commit()
+                            enriched_count += len(chunk)
+                            logger.info(
+                                "Enrichment chunk committed: %d/%d regular txns done",
+                                enriched_count,
+                                len(regular_txns),
+                            )
+
+                            # Pause between chunks to ease rate-limit pressure
+                            if chunk_start + CHUNK < len(regular_txns):
+                                await asyncio.sleep(2)
+
+                        except ai_service.RateLimitError:
+                            logger.warning(
+                                "Background enrichment rate-limited after %d/%d regular txns "
+                                "— remaining %d rows stay unenriched for next retry",
+                                enriched_count,
+                                len(regular_txns),
+                                len(regular_txns) - enriched_count,
+                            )
+                            return
+
                 logger.info(
                     "Background enrichment complete: %d regular, %d Amazon",
                     len(regular_txns),

@@ -37,8 +37,8 @@ _GROQ_MODEL = "llama-3.3-70b-versatile"
 _cohere = cohere.AsyncClientV2(api_key=settings.COHERE_API_KEY) if settings.COHERE_API_KEY else None
 _COHERE_MODEL = "command-r7b-12-2024"
 
-_NORMALIZE_CHUNK = 40
-_SUGGEST_CHUNK   = 50
+_NORMALIZE_CHUNK = 20
+_SUGGEST_CHUNK   = 20
 
 
 # ---------------------------------------------------------------------------

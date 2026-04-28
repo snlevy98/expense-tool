@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { AlertCircle, CheckCircle, ChevronLeft, ChevronRight, Loader2, Sparkles, XCircle } from 'lucide-react'
+import { AlertCircle, CheckCircle, ChevronLeft, ChevronRight, Loader2, RefreshCw, Sparkles, XCircle } from 'lucide-react'
 import { getTransactions, updateTransaction, deleteTransaction } from '../services/transactionService'
 import { useCategories } from '../hooks/useCategories'
 import { useAppStore } from '../store/appStore'
@@ -215,15 +215,26 @@ export default function Categorize() {
               : 'All transactions are categorized'}
           </p>
         </div>
-        <button
-          onClick={handleAutoEnrich}
-          disabled={enriching}
-          className="btn-secondary shrink-0"
-        >
-          {enriching
-            ? <><Loader2 size={14} className="animate-spin" /> Enriching…</>
-            : <><Sparkles size={14} /> Auto-categorize</>}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={fetchPage}
+            disabled={loading}
+            className="btn-secondary"
+            title="Refresh transactions"
+          >
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+          <button
+            onClick={handleAutoEnrich}
+            disabled={enriching}
+            className="btn-secondary"
+          >
+            {enriching
+              ? <><Loader2 size={14} className="animate-spin" /> Enriching…</>
+              : <><Sparkles size={14} /> Auto-categorize</>}
+          </button>
+        </div>
       </div>
 
       {enrichResult && (
