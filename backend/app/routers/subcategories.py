@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,48 +36,6 @@ async def create_subcategory(
     await db.flush()
     await db.refresh(subcategory)
     return subcategory
-
-
-@router.put("/{subcategory_id}/move", response_model=SubcategoryOut)
-async def move_subcategory(
-    subcategory_id: uuid.UUID,
-    direction: str = Query(..., pattern="^(up|down)$"),
-    db: AsyncSession = Depends(get_db),
-    auth: dict = Depends(require_auth),
-) -> SubcategoryOut:
-    """Swap this subcategory's sort_order with its neighbour (up = lower index, down = higher)."""
-    result = await db.execute(
-        select(Subcategory).where(Subcategory.id == subcategory_id)
-    )
-    sub = result.scalar_one_or_none()
-    if not sub:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subcategory not found")
-
-    # Fetch all siblings sorted by (sort_order, created_at)
-    siblings_result = await db.execute(
-        select(Subcategory)
-        .where(Subcategory.category_id == sub.category_id)
-        .order_by(Subcategory.sort_order, Subcategory.created_at)
-    )
-    siblings = siblings_result.scalars().all()
-
-    idx = next((i for i, s in enumerate(siblings) if s.id == subcategory_id), None)
-    if idx is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subcategory not found in siblings")
-
-    if direction == "up" and idx > 0:
-        neighbour = siblings[idx - 1]
-    elif direction == "down" and idx < len(siblings) - 1:
-        neighbour = siblings[idx + 1]
-    else:
-        # Already at boundary — no-op, return current state
-        return sub
-
-    # Swap sort_order values
-    sub.sort_order, neighbour.sort_order = neighbour.sort_order, sub.sort_order
-    await db.flush()
-    await db.refresh(sub)
-    return sub
 
 
 @router.put("/{subcategory_id}", response_model=SubcategoryOut)

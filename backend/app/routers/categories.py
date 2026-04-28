@@ -10,7 +10,7 @@ from app.middleware.auth import require_auth
 from app.models.category import Category
 from app.models.subcategory import Subcategory
 from app.models.transaction import Transaction
-from app.schemas.category import CategoryCreate, CategoryOut, CategoryUpdate
+from app.schemas.category import CategoryCreate, CategoryOut, CategoryUpdate, SubcategoryReorderRequest
 
 router = APIRouter(prefix="/categories", tags=["categories"])
 
@@ -46,6 +46,23 @@ async def create_category(
     await db.flush()
     await db.refresh(category)
     return category
+
+
+@router.put("/{category_id}/subcategories/reorder", status_code=status.HTTP_204_NO_CONTENT)
+async def reorder_subcategories(
+    category_id: uuid.UUID,
+    body: SubcategoryReorderRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> None:
+    """Set sort_order for each subcategory according to the provided ordered list of IDs."""
+    for index, sub_id in enumerate(body.subcategory_ids):
+        await db.execute(
+            update(Subcategory)
+            .where(Subcategory.id == sub_id, Subcategory.category_id == category_id)
+            .values(sort_order=index)
+        )
+    await db.flush()
 
 
 @router.put("/{category_id}", response_model=CategoryOut)

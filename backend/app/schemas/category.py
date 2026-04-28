@@ -6,6 +6,10 @@ from pydantic import BaseModel, ConfigDict
 from app.schemas.subcategory import SubcategoryOut
 
 
+class SubcategoryReorderRequest(BaseModel):
+    subcategory_ids: list[uuid.UUID]
+
+
 class CategoryCreate(BaseModel):
     name: str
     color: str = "#4A90E2"

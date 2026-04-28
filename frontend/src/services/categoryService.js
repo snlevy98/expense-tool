@@ -35,7 +35,9 @@ export const deleteSubcategory = async (id) => {
   return data
 }
 
-export const moveSubcategory = async (id, direction) => {
-  const { data } = await api.put(`/api/subcategories/${id}/move?direction=${direction}`)
-  return data
+/** Persist a new subcategory order for one category (one call per drag-drop). */
+export const reorderSubcategories = async (categoryId, subcategoryIds) => {
+  await api.put(`/api/categories/${categoryId}/subcategories/reorder`, {
+    subcategory_ids: subcategoryIds,
+  })
 }
