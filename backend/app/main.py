@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.jobs.recurring_detection import run_recurring_detection
-from app.routers import accounts, amazon, budgets, categories, import_csv, reports, subcategories, transactions
+from app.routers import accounts, amazon, budgets, categories, import_csv, ml, reports, subcategories, transactions
+from app.services.ml import categorize as ml_categorize
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +25,13 @@ scheduler = AsyncIOScheduler()
 async def lifespan(app: FastAPI):
     # ---- Startup ----
     logger.info("Starting expense-tracker API (env=%s)", settings.ENVIRONMENT)
+
+    # Load the local categorization model from disk if present.
+    # Safe to call before any request — falls back to keyword matching when missing.
+    try:
+        ml_categorize.load_model_if_exists()
+    except Exception:
+        logger.exception("Failed to load categorization model on startup")
 
     # Schedule the nightly recurring-detection job at 02:00 server time
     scheduler.add_job(
@@ -84,6 +92,7 @@ app.include_router(import_csv.router, prefix=API_PREFIX)
 app.include_router(amazon.router, prefix=API_PREFIX)
 app.include_router(budgets.router, prefix=API_PREFIX)
 app.include_router(reports.router, prefix=API_PREFIX)
+app.include_router(ml.router, prefix=API_PREFIX)
 
 # ---------------------------------------------------------------------------
 # Health check
