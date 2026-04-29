@@ -11,6 +11,7 @@ import asyncio
 import logging
 import uuid
 from collections import Counter, defaultdict
+from datetime import timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
@@ -20,6 +21,7 @@ from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
 from app.middleware.auth import require_auth
+from app.models.account import Account
 from app.models.category import Category
 from app.models.transaction import Transaction
 from app.schemas.transaction import (
@@ -29,6 +31,7 @@ from app.schemas.transaction import (
     ImportConfirmRequest,
     ImportPreviewItem,
     ImportPreviewResponse,
+    VenmoUnmatchedItem,
 )
 from app.services import ai_service
 from app.services.csv_service import parse_file
@@ -57,15 +60,62 @@ async def preview_import(
             detail="Only CSV and Excel (.xlsx, .xls) files are accepted.",
         )
 
+    account_result = await db.execute(select(Account).where(Account.id == account_id))
+    account = account_result.scalar_one_or_none()
+    account_type = account.type if account else None
+
     contents = await file.read()
     try:
-        parsed_rows = parse_file(contents, filename=file.filename or "upload.csv")
+        parsed_rows = parse_file(contents, filename=file.filename or "upload.csv", account_type=account_type)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
         ) from exc
 
     if not parsed_rows:
+        return ImportPreviewResponse(transactions=[], duplicates_skipped=0)
+
+    # ---- Venmo bank-transfer matching ----
+    # Rows where funding source / destination is a real bank account (not Venmo balance)
+    # correspond to a charge or deposit that also appears on the linked bank statement.
+    # Try to find the existing bank transaction (amount exact, date ±3 days, description
+    # contains "venmo") and record its ID so /confirm can update it instead of inserting.
+    venmo_unmatched: list[VenmoUnmatchedItem] = []
+    for row in parsed_rows:
+        if not row.get("is_venmo_bank_transfer"):
+            continue
+        date_val = row["transaction_date"]
+        amount_val = row["amount"]
+        match_result = await db.execute(
+            select(Transaction).where(
+                and_(
+                    Transaction.amount == amount_val,
+                    Transaction.transaction_date >= date_val - timedelta(days=3),
+                    Transaction.transaction_date <= date_val + timedelta(days=3),
+                    Transaction.raw_description.ilike("%venmo%"),
+                )
+            ).limit(1)
+        )
+        matched_txn = match_result.scalar_one_or_none()
+        if matched_txn:
+            row["matched_transaction_id"] = str(matched_txn.id)
+        else:
+            venmo_unmatched.append(
+                VenmoUnmatchedItem(
+                    transaction_date=date_val,
+                    amount=amount_val,
+                    merchant_name=row.get("merchant_name", ""),
+                    raw_description=row.get("raw_description", ""),
+                )
+            )
+
+    # Drop unmatched bank-transfer rows — they have no place to land
+    parsed_rows = [
+        r for r in parsed_rows
+        if not r.get("is_venmo_bank_transfer") or r.get("matched_transaction_id")
+    ]
+
+    if not parsed_rows and not venmo_unmatched:
         return ImportPreviewResponse(transactions=[], duplicates_skipped=0)
 
     # ---- Duplicate detection ----
@@ -134,7 +184,11 @@ async def preview_import(
     duplicates_skipped = len(parsed_rows) - len(unique_rows)
 
     if not unique_rows:
-        return ImportPreviewResponse(transactions=[], duplicates_skipped=duplicates_skipped)
+        return ImportPreviewResponse(
+            transactions=[],
+            duplicates_skipped=duplicates_skipped,
+            venmo_unmatched=venmo_unmatched,
+        )
 
     # Build preview items with raw data — AI enrichment happens client-side via /enrich
     preview_items = [
@@ -148,11 +202,17 @@ async def preview_import(
             external_reference=row.get("external_reference"),
             ai_suggested_category_id=None,
             ai_suggested_subcategory_id=None,
+            matched_transaction_id=uuid.UUID(row["matched_transaction_id"])
+                if row.get("matched_transaction_id") else None,
         )
         for idx, row in enumerate(unique_rows)
     ]
 
-    return ImportPreviewResponse(transactions=preview_items, duplicates_skipped=duplicates_skipped)
+    return ImportPreviewResponse(
+        transactions=preview_items,
+        duplicates_skipped=duplicates_skipped,
+        venmo_unmatched=venmo_unmatched,
+    )
 
 
 @router.post("/enrich", response_model=EnrichResponse)
@@ -266,17 +326,21 @@ async def enrich_batch(
 
     txns = all_txns  # keep original ordering for result assembly
 
+    is_venmo = (body.account_type or "").lower() == "venmo"
+
     try:
         suggestions: list[dict] = []
         if regular_txns:
-            # Normalize merchant names for non-Amazon transactions
-            descriptions = [t["raw_description"] for t in regular_txns]
-            normalized = await ai_service.normalize_merchant_names_batch(descriptions)
-            for txn, name in zip(regular_txns, normalized):
-                if name:
-                    txn["merchant_name"] = name
+            if not is_venmo:
+                # Normalize merchant names — skipped for Venmo since merchant_name
+                # is already set to the other person's name during CSV parsing.
+                descriptions = [t["raw_description"] for t in regular_txns]
+                normalized = await ai_service.normalize_merchant_names_batch(descriptions)
+                for txn, name in zip(regular_txns, normalized):
+                    if name:
+                        txn["merchant_name"] = name
 
-            # Suggest categories using normalized names + past examples
+            # Suggest categories using merchant name + raw_description + past examples
             suggestions = await ai_service.suggest_categories(
                 regular_txns, category_dicts, examples_text=examples_text
             )
@@ -334,25 +398,41 @@ async def confirm_import(
     saved_transactions: list[Transaction] = []
 
     for item in body.transactions:
-        txn = Transaction(
-            id=uuid.uuid4(),
-            account_id=item.account_id,
-            category_id=item.category_id,
-            subcategory_id=item.subcategory_id,
-            transaction_date=item.transaction_date,
-            raw_description=item.raw_description,
-            merchant_name=item.merchant_name,
-            amount=item.amount,
-            ai_suggested_category_id=item.ai_suggested_category_id,
-            ai_suggested_subcategory_id=item.ai_suggested_subcategory_id,
-            ai_enriched=item.ai_enriched,
-            is_recurring=False,
-            import_source=item.import_source,
-            import_batch_id=import_batch_id,
-            external_reference=item.external_reference,
-        )
-        db.add(txn)
-        saved_transactions.append(txn)
+        if item.matched_transaction_id:
+            # Venmo→bank match: enrich the existing bank transaction in-place.
+            # Preserves the original account, amount, date, and any manual categorization.
+            match_result = await db.execute(
+                select(Transaction).where(Transaction.id == item.matched_transaction_id)
+            )
+            existing = match_result.scalar_one_or_none()
+            if existing:
+                existing.merchant_name = item.merchant_name
+                existing.raw_description = item.raw_description
+                existing.ai_suggested_category_id = item.ai_suggested_category_id
+                existing.ai_suggested_subcategory_id = item.ai_suggested_subcategory_id
+                existing.ai_enriched = item.ai_enriched
+                existing.import_batch_id = import_batch_id
+                saved_transactions.append(existing)
+        else:
+            txn = Transaction(
+                id=uuid.uuid4(),
+                account_id=item.account_id,
+                category_id=item.category_id,
+                subcategory_id=item.subcategory_id,
+                transaction_date=item.transaction_date,
+                raw_description=item.raw_description,
+                merchant_name=item.merchant_name,
+                amount=item.amount,
+                ai_suggested_category_id=item.ai_suggested_category_id,
+                ai_suggested_subcategory_id=item.ai_suggested_subcategory_id,
+                ai_enriched=item.ai_enriched,
+                is_recurring=False,
+                import_source=item.import_source,
+                import_batch_id=import_batch_id,
+                external_reference=item.external_reference,
+            )
+            db.add(txn)
+            saved_transactions.append(txn)
 
     await db.flush()
 

@@ -436,11 +436,152 @@ def parse_excel(file_bytes: bytes, filename: str = "upload.xlsx") -> list[dict]:
     return _rows_to_transactions(rows, filename)
 
 
-def parse_file(file_bytes: bytes, filename: str) -> list[dict]:
+def _venmo_account_holder(rows: list[list[str]]) -> str:
+    """Extract account holder name from 'Account Statement - (@Handle)' header row."""
+    if not rows or not rows[0]:
+        return ""
+    first_cell = str(rows[0][0]).strip()
+    m = re.search(r"@([^)]+)", first_cell)
+    if m:
+        return m.group(1).strip().replace("-", " ")
+    return ""
+
+
+def _venmo_other_person(from_name: str, to_name: str, account_holder: str) -> str:
+    """Return whichever of from/to is not the account holder (word-overlap fallback)."""
+    holder_norm = account_holder.strip().lower()
+    if from_name.strip().lower() == holder_norm:
+        return to_name.strip()
+    if to_name.strip().lower() == holder_norm:
+        return from_name.strip()
+    holder_words = set(holder_norm.split())
+    from_overlap = len(set(from_name.strip().lower().split()) & holder_words)
+    to_overlap = len(set(to_name.strip().lower().split()) & holder_words)
+    return to_name.strip() if from_overlap >= to_overlap else from_name.strip()
+
+
+def parse_venmo_csv(file_bytes: bytes, filename: str = "venmo.csv") -> list[dict]:
+    """Parse a Venmo statement CSV export into transaction dicts."""
+    content = file_bytes.decode("utf-8-sig", errors="replace")
+    reader = csv.reader(io.StringIO(content))
+    rows = list(reader)
+
+    account_holder = _venmo_account_holder(rows)
+
+    header_row_idx: int | None = None
+    header_norm: list[str] = []
+    for i, row in enumerate(rows):
+        norm = [c.strip().lower() for c in row]
+        if "id" in norm and "datetime" in norm and "from" in norm and "to" in norm:
+            header_row_idx = i
+            header_norm = norm
+            break
+
+    if header_row_idx is None:
+        raise ValueError(
+            "Could not find Venmo CSV header row (expected ID, Datetime, From, To columns)."
+        )
+
+    def _col(name: str) -> int | None:
+        return header_norm.index(name) if name in header_norm else None
+
+    id_idx = _col("id")
+    dt_idx = _col("datetime")
+    note_idx = _col("note")
+    from_idx = _col("from")
+    to_idx = _col("to")
+    status_idx = _col("status")
+    funding_source_idx = _col("funding source")
+    destination_idx = _col("destination")
+    amount_idx = next(
+        (i for i, h in enumerate(header_norm) if "amount" in h and "total" in h), None
+    )
+
+    if id_idx is None or dt_idx is None or from_idx is None or to_idx is None:
+        raise ValueError("Venmo CSV is missing required columns (ID, Datetime, From, To).")
+    if amount_idx is None:
+        raise ValueError("Could not find 'Amount (total)' column in Venmo CSV.")
+
+    transactions: list[dict] = []
+    for row in rows[header_row_idx + 1:]:
+        row = [str(c) for c in row]
+        needed = max(id_idx, dt_idx, from_idx, to_idx, amount_idx)
+        if len(row) <= needed:
+            continue
+
+        txn_id = row[id_idx].strip()
+        if not txn_id or txn_id.lower() == "nan":
+            continue
+
+        raw_dt = row[dt_idx].strip()
+        if not raw_dt:
+            continue
+
+        if status_idx is not None and status_idx < len(row):
+            if row[status_idx].strip().lower() not in ("complete", ""):
+                continue
+
+        try:
+            txn_date = _parse_date(raw_dt)
+        except ValueError:
+            continue
+
+        note = (row[note_idx].strip() if note_idx is not None and note_idx < len(row) else "") or ""
+        from_name = row[from_idx].strip() if from_idx < len(row) else ""
+        to_name = row[to_idx].strip() if to_idx < len(row) else ""
+
+        amount_raw = row[amount_idx].strip() if amount_idx < len(row) else ""
+        if not amount_raw:
+            continue
+        # Venmo sign convention is inverted vs app convention:
+        # Venmo "+" = money received (income) → app negative; "–" = money sent (expense) → app positive
+        amount = -_parse_amount(amount_raw)
+
+        merchant_name = (
+            _venmo_other_person(from_name, to_name, account_holder)
+            if account_holder
+            else (to_name or from_name)
+        )
+
+        funding_source = (
+            row[funding_source_idx].strip()
+            if funding_source_idx is not None and funding_source_idx < len(row)
+            else ""
+        )
+        destination = (
+            row[destination_idx].strip()
+            if destination_idx is not None and destination_idx < len(row)
+            else ""
+        )
+        # If funding source or destination is a real bank account (not Venmo balance),
+        # this transaction also appears on the linked bank/card statement.
+        is_bank_transfer = (
+            (bool(funding_source) and funding_source.lower() != "venmo balance") or
+            (bool(destination) and destination.lower() != "venmo balance")
+        )
+
+        transactions.append(
+            {
+                "raw_description": note or merchant_name,
+                "merchant_name": merchant_name or note or txn_id,
+                "amount": amount,
+                "transaction_date": txn_date,
+                "import_source": filename,
+                "external_reference": txn_id,
+                "is_venmo_bank_transfer": is_bank_transfer,
+            }
+        )
+
+    return transactions
+
+
+def parse_file(file_bytes: bytes, filename: str, account_type: str | None = None) -> list[dict]:
     """
     Auto-detect file type from extension and parse accordingly.
-    Supports .csv, .xlsx, .xls.
+    Supports .csv, .xlsx, .xls. Venmo accounts use a dedicated parser.
     """
+    if account_type and account_type.lower() == "venmo":
+        return parse_venmo_csv(file_bytes, filename)
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
     if ext in ("xlsx", "xls"):
         return parse_excel(file_bytes, filename)

@@ -70,6 +70,7 @@ def _build_filters(
 def _apply_sort(query, sort_by: str, sort_dir: str):
     column_map = {
         "date": Transaction.transaction_date,
+        "transaction_date": Transaction.transaction_date,
         "amount": Transaction.amount,
         "merchant_name": Transaction.merchant_name,
     }

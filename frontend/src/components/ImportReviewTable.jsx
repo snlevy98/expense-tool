@@ -24,6 +24,7 @@ export default function ImportReviewTable({ items, onUpdate }) {
             <th className="table-header">Description</th>
             <th className="table-header">Merchant</th>
             <th className="table-header">Amount</th>
+            <th className="table-header w-28"></th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -68,6 +69,13 @@ export default function ImportReviewTable({ items, onUpdate }) {
                 >
                   {parseFloat(item.amount) < 0 ? '+' : ''}$
                   {Math.abs(parseFloat(item.amount) || 0).toFixed(2)}
+                </td>
+                <td className="table-cell">
+                  {item.matched_transaction_id && (
+                    <span className="inline-block px-1.5 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 whitespace-nowrap">
+                      Updates existing
+                    </span>
+                  )}
                 </td>
               </tr>
             )

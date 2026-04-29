@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, ChevronRight, GripVertical, Lock, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { AlertCircle, Brain, Check, ChevronDown, ChevronRight, GripVertical, Loader2, Lock, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useAppStore } from '../store/appStore'
 import { useCategories } from '../hooks/useCategories'
 import {
@@ -10,8 +10,9 @@ import {
   createSubcategory, updateSubcategory, deleteSubcategory,
   reorderSubcategories,
 } from '../services/categoryService'
+import { getTrainingDataStats, trainCategorizer } from '../services/mlService'
 
-const ACCOUNT_TYPES = ['checking', 'savings', 'credit_card', 'investment', 'cash', 'other']
+const ACCOUNT_TYPES = ['checking', 'savings', 'credit_card', 'investment', 'cash', 'venmo', 'other']
 
 // ---------------------------------------------------------------------------
 // Account rows
@@ -346,6 +347,246 @@ function CategoryRow({ category, protected: isProtected, onUpdateCat, onDeleteCa
 }
 
 // ---------------------------------------------------------------------------
+// Machine learning panel
+// ---------------------------------------------------------------------------
+
+function formatRelativeTime(iso) {
+  if (!iso) return null
+  const then = new Date(iso).getTime()
+  const now = Date.now()
+  const diffSec = Math.max(0, Math.floor((now - then) / 1000))
+  if (diffSec < 60)        return 'just now'
+  if (diffSec < 3600)      return `${Math.floor(diffSec / 60)} min ago`
+  if (diffSec < 86400)     return `${Math.floor(diffSec / 3600)} hr ago`
+  const days = Math.floor(diffSec / 86400)
+  if (days < 30)           return `${days} day${days === 1 ? '' : 's'} ago`
+  return new Date(iso).toLocaleDateString()
+}
+
+function bucketCategory(cat) {
+  // <10 txns OR no evaluation possible → Weak (data-shortage)
+  if (cat.n_transactions < 10 || cat.accuracy === null || cat.accuracy === undefined) return 'weak'
+  if (cat.accuracy >= 0.80) return 'strong'
+  if (cat.accuracy >= 0.60) return 'decent'
+  return 'weak'
+}
+
+function CategoryAccuracyRow({ cat }) {
+  const bucket = bucketCategory(cat)
+  const dotColor = bucket === 'strong' ? 'bg-emerald-500'
+                 : bucket === 'decent' ? 'bg-amber-500'
+                 : 'bg-slate-300'
+  const accDisplay =
+    cat.accuracy === null || cat.accuracy === undefined || cat.n_transactions < 10
+      ? '—'
+      : `${Math.round(cat.accuracy * 100)}%`
+  const tooFew = cat.n_transactions < 10
+
+  return (
+    <div className="flex items-center text-sm py-1">
+      <span className={`w-2 h-2 rounded-full ${dotColor} shrink-0 mr-2.5`} />
+      <span className="flex-1 text-slate-700 truncate">{cat.name}</span>
+      <span className="w-12 text-right tabular-nums text-slate-700 font-medium">{accDisplay}</span>
+      <span className="w-28 text-right text-xs text-slate-400">
+        {cat.n_transactions} txn{cat.n_transactions === 1 ? '' : 's'}
+        {tooFew && cat.n_transactions > 0 && <span className="text-slate-400"> · too few</span>}
+      </span>
+    </div>
+  )
+}
+
+function MachineLearningPanel() {
+  const [stats, setStats] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [training, setTraining] = useState(false)
+  const [error, setError] = useState(null)
+  const [showBreakdown, setShowBreakdown] = useState(false)
+  const [justTrained, setJustTrained] = useState(false)
+
+  const loadStats = async () => {
+    try {
+      setError(null)
+      const data = await getTrainingDataStats()
+      setStats(data)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Failed to load model stats')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadStats() }, [])
+
+  const handleTrain = async () => {
+    setTraining(true)
+    setError(null)
+    setJustTrained(false)
+    try {
+      await trainCategorizer()
+      setJustTrained(true)
+      await loadStats()
+      // Hide the success badge after a few seconds
+      setTimeout(() => setJustTrained(false), 4000)
+    } catch (err) {
+      const detail = err.response?.data?.detail || err.message || 'Training failed'
+      setError(detail)
+    } finally {
+      setTraining(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="card flex items-center gap-2 text-slate-400 text-sm">
+        <Loader2 size={14} className="animate-spin" /> Loading model status…
+      </div>
+    )
+  }
+
+  const model = stats?.model
+  const totalConfirmed = stats?.total_confirmed ?? 0
+  const minRequired = stats?.thresholds?.min_train_rows ?? 30
+  const canTrain = totalConfirmed >= minRequired
+
+  // Sort categories: strong → decent → weak, by accuracy desc within each bucket
+  const sortedCats = [...(stats?.categories ?? [])].sort((a, b) => {
+    const ba = bucketCategory(a), bb = bucketCategory(b)
+    const order = { strong: 0, decent: 1, weak: 2 }
+    if (order[ba] !== order[bb]) return order[ba] - order[bb]
+    return (b.accuracy ?? -1) - (a.accuracy ?? -1)
+  })
+  const grouped = {
+    strong: sortedCats.filter((c) => bucketCategory(c) === 'strong'),
+    decent: sortedCats.filter((c) => bucketCategory(c) === 'decent'),
+    weak:   sortedCats.filter((c) => bucketCategory(c) === 'weak'),
+  }
+
+  return (
+    <div className="card">
+      <div className="flex items-start gap-2 mb-4">
+        <Brain size={16} className="text-indigo-500 mt-0.5 shrink-0" />
+        <div className="flex-1">
+          <h2 className="font-semibold text-slate-700 text-base">Machine Learning</h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Local categorization model. Improves as you confirm more transactions — retrain to pick up your latest corrections.
+          </p>
+        </div>
+      </div>
+
+      {/* Status line */}
+      <div className="flex items-center justify-between flex-wrap gap-3 px-4 py-3 bg-slate-50 border border-slate-200 rounded-lg">
+        <div className="text-sm text-slate-700">
+          {model?.trained ? (
+            <>
+              Trained <span className="font-medium">{formatRelativeTime(model.trained_at)}</span>
+              {' · '}
+              <span className="font-medium">{model.n_samples}</span> transactions
+              {' · '}
+              <span className="font-medium">{Math.round((model.accuracy ?? 0) * 100)}%</span> accurate
+            </>
+          ) : (
+            <>
+              No model trained yet.
+              {totalConfirmed > 0 && (
+                <span className="text-slate-500"> {totalConfirmed} transactions ready to train on.</span>
+              )}
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {justTrained && (
+            <span className="text-xs text-emerald-600 font-medium flex items-center gap-1">
+              <Check size={13} /> Done
+            </span>
+          )}
+          <button
+            onClick={handleTrain}
+            disabled={training || !canTrain}
+            className="btn-primary py-1.5 px-3 text-sm"
+            title={!canTrain ? `Need at least ${minRequired} confirmed transactions (have ${totalConfirmed})` : ''}
+          >
+            {training ? (
+              <><Loader2 size={14} className="animate-spin" /> Training…</>
+            ) : (
+              model?.trained ? 'Retrain' : 'Train Model'
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {/* Helpful hint when below the training threshold */}
+      {!canTrain && !error && (
+        <div className="mt-3 text-xs text-slate-500">
+          Need at least <span className="font-medium">{minRequired}</span> confirmed transactions before training.
+          You have <span className="font-medium">{totalConfirmed}</span>.
+        </div>
+      )}
+
+      {/* Per-category breakdown */}
+      {model?.trained && sortedCats.length > 0 && (
+        <div className="mt-4">
+          <button
+            onClick={() => setShowBreakdown((v) => !v)}
+            className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700 font-medium"
+          >
+            {showBreakdown ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            {showBreakdown ? 'Hide' : 'Show'} per-category breakdown
+          </button>
+
+          {showBreakdown && (
+            <div className="mt-3 space-y-4">
+              {grouped.strong.length > 0 && (
+                <div>
+                  <h3 className="text-[11px] font-semibold uppercase tracking-wider text-emerald-700 mb-1.5">
+                    Strong  <span className="text-slate-400 normal-case font-normal">(&gt;80% accuracy)</span>
+                  </h3>
+                  <div className="divide-y divide-slate-100">
+                    {grouped.strong.map((c) => <CategoryAccuracyRow key={c.id} cat={c} />)}
+                  </div>
+                </div>
+              )}
+              {grouped.decent.length > 0 && (
+                <div>
+                  <h3 className="text-[11px] font-semibold uppercase tracking-wider text-amber-700 mb-1.5">
+                    Decent  <span className="text-slate-400 normal-case font-normal">(60–80%)</span>
+                  </h3>
+                  <div className="divide-y divide-slate-100">
+                    {grouped.decent.map((c) => <CategoryAccuracyRow key={c.id} cat={c} />)}
+                  </div>
+                </div>
+              )}
+              {grouped.weak.length > 0 && (
+                <div>
+                  <h3 className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                    Weak — needs more data  <span className="text-slate-400 normal-case font-normal">(&lt;60% or &lt;10 txns)</span>
+                  </h3>
+                  <div className="divide-y divide-slate-100">
+                    {grouped.weak.map((c) => <CategoryAccuracyRow key={c.id} cat={c} />)}
+                  </div>
+                </div>
+              )}
+              {stats?.user_corrections > 0 && (
+                <p className="text-xs text-slate-400 pt-2 border-t border-slate-100">
+                  The model weights your <span className="font-medium">{stats.user_corrections}</span> corrections 3× more than uncorrected confirmations.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -456,6 +697,9 @@ export default function Settings() {
           </div>
         </div>
       </div>
+
+      {/* Machine Learning */}
+      <MachineLearningPanel />
 
       {/* System categories (Income, Investments) */}
       {systemCats.length > 0 && (

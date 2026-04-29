@@ -50,11 +50,20 @@ class ImportPreviewItem(BaseModel):
     external_reference: str | None = None
     ai_suggested_category_id: uuid.UUID | None = None
     ai_suggested_subcategory_id: uuid.UUID | None = None
+    matched_transaction_id: uuid.UUID | None = None
+
+
+class VenmoUnmatchedItem(BaseModel):
+    transaction_date: date
+    amount: Decimal
+    merchant_name: str
+    raw_description: str
 
 
 class ImportPreviewResponse(BaseModel):
     transactions: list[ImportPreviewItem]
     duplicates_skipped: int = 0
+    venmo_unmatched: list[VenmoUnmatchedItem] = []
 
 
 class ImportConfirmItem(BaseModel):
@@ -70,6 +79,7 @@ class ImportConfirmItem(BaseModel):
     ai_suggested_category_id: uuid.UUID | None = None
     ai_suggested_subcategory_id: uuid.UUID | None = None
     ai_enriched: bool = False  # frontend sets True for rows that went through /enrich
+    matched_transaction_id: uuid.UUID | None = None  # set for Venmo→bank matches
 
 
 class ImportConfirmRequest(BaseModel):
@@ -90,6 +100,7 @@ class EnrichItem(BaseModel):
 
 class EnrichRequest(BaseModel):
     transactions: list[EnrichItem]
+    account_type: str | None = None
 
 
 class EnrichResult(BaseModel):

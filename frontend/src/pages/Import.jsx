@@ -45,6 +45,7 @@ export default function Import() {
   const [file, setFile] = useState(null)
   const [items, setItems] = useState([])
   const [stats, setStats] = useState(null)
+  const [venmoUnmatched, setVenmoUnmatched] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [success, setSuccess] = useState(false)
@@ -74,7 +75,7 @@ export default function Import() {
 
   // ---- Progressive AI enrichment ----
 
-  const processBatch = useCallback(async (batch, retryCount = 0) => {
+  const processBatch = useCallback(async (batch, accountType, retryCount = 0) => {
     if (abortEnrichRef.current) return
     try {
       const { data } = await api.post('/api/import/enrich', {
@@ -84,6 +85,7 @@ export default function Import() {
           merchant_name: item.merchant_name,
           amount: String(item.amount),
         })),
+        account_type: accountType ?? null,
       })
       setItems((prev) => {
         const next = [...prev]
@@ -114,13 +116,13 @@ export default function Import() {
         }
         setEnrichStatus('running')
         setRetryCountdown(0)
-        return processBatch(batch, retryCount + 1)
+        return processBatch(batch, accountType, retryCount + 1)
       }
       console.error('Enrichment batch failed permanently:', err)
     }
   }, [])
 
-  const runEnrichment = useCallback(async (allItems) => {
+  const runEnrichment = useCallback(async (allItems, accountType) => {
     abortEnrichRef.current = false
     setEnrichStatus('running')
     setEnrichProgress({ processed: 0, total: allItems.length })
@@ -128,7 +130,7 @@ export default function Import() {
     for (let start = 0; start < allItems.length; start += ENRICH_BATCH_SIZE) {
       if (abortEnrichRef.current) return
       const batch = allItems.slice(start, start + ENRICH_BATCH_SIZE)
-      await processBatch(batch)
+      await processBatch(batch, accountType)
       if (!abortEnrichRef.current) {
         setEnrichProgress({ processed: start + batch.length, total: allItems.length })
       }
@@ -153,10 +155,12 @@ export default function Import() {
       })
       const previewItems = Array.isArray(data) ? data : (data.transactions ?? [])
       const enrichableItems = previewItems.map((item) => ({ ...item, include: true, enriched: false }))
+      const selectedAccount = accounts.find((a) => a.id === accountId)
       setItems(enrichableItems)
       setStats({ duplicates_skipped: data.duplicates_skipped ?? 0 })
+      setVenmoUnmatched(data.venmo_unmatched ?? [])
       setStep(1)
-      runEnrichment(enrichableItems)
+      runEnrichment(enrichableItems, selectedAccount?.type ?? null)
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Preview failed')
     } finally {
@@ -211,6 +215,7 @@ export default function Import() {
     setFile(null)
     setItems([])
     setStats(null)
+    setVenmoUnmatched([])
     setSuccess(false)
     setError(null)
     setAccountId('')
@@ -330,6 +335,31 @@ export default function Import() {
               </button>
             </div>
           </div>
+
+          {/* Venmo unmatched warning */}
+          {venmoUnmatched.length > 0 && (
+            <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg text-sm">
+              <div className="flex items-center gap-2 font-medium text-amber-800 mb-2">
+                <AlertCircle size={15} />
+                {venmoUnmatched.length} Venmo transaction{venmoUnmatched.length !== 1 ? 's' : ''} skipped — no matching bank transaction found
+              </div>
+              <ul className="space-y-0.5 text-amber-700">
+                {venmoUnmatched.map((t, i) => (
+                  <li key={i} className="flex items-center gap-2 text-xs">
+                    <span className="text-amber-400">•</span>
+                    <span className="font-medium">{t.merchant_name}</span>
+                    {t.raw_description && t.raw_description !== t.merchant_name && (
+                      <span className="text-amber-600">"{t.raw_description}"</span>
+                    )}
+                    <span className={parseFloat(t.amount) < 0 ? 'text-emerald-600 font-medium' : 'font-medium'}>
+                      {parseFloat(t.amount) < 0 ? '+' : ''}${Math.abs(parseFloat(t.amount)).toFixed(2)}
+                    </span>
+                    <span className="text-amber-500">{t.transaction_date}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {/* AI enrichment status */}
           {enrichStatus !== 'idle' && (
