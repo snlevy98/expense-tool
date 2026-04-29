@@ -107,9 +107,9 @@ async def _call_groq(prompt: str) -> str:
 
 
 async def _call_cohere(prompt: str) -> str:
-    """Recurring detection provider. Falls back to Gemini if key not configured."""
+    """Recurring detection provider. Raises RuntimeError if key not configured (no Gemini fallback)."""
     if not _cohere:
-        return await _call_gemini(prompt)
+        raise RuntimeError("COHERE_API_KEY is not configured — skipping AI recurring detection")
     try:
         resp = await _cohere.chat(
             model=_COHERE_MODEL,
