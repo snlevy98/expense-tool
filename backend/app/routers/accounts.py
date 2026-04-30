@@ -35,6 +35,7 @@ async def create_account(
         name=body.name,
         type=body.type,
         institution=body.institution,
+        sign_convention=body.sign_convention,
     )
     db.add(account)
     await db.flush()

@@ -192,27 +192,10 @@ def _detect_columns_positionally(
     if desc_idx is None:
         return None
 
-    # Detect sign convention: if majority of non-zero amounts are negative,
-    # the file uses negative-for-expense; flip signs to match app convention.
-    sign_flip = False
-    all_vals = [str(r[amount_idx]).strip().strip('"') for r in rows if amount_idx < len(r)]
-    parsed_amounts = []
-    for v in all_vals:
-        clean = re.sub(r"[^\d.\-]", "", v)
-        if clean and clean not in ("", "-", "."):
-            try:
-                parsed_amounts.append(Decimal(clean))
-            except InvalidOperation:
-                pass
-    nonzero = [a for a in parsed_amounts if a != 0]
-    if nonzero and sum(1 for a in nonzero if a < 0) > len(nonzero) * 0.5:
-        sign_flip = True
-
     return {
         "date_idx": date_idx,
         "amount_idx": amount_idx,
         "desc_idx": desc_idx,
-        "sign_flip": sign_flip,
     }
 
 
@@ -263,7 +246,9 @@ def _row_is_header(row: list[str]) -> bool:
     return has_date and (has_desc or has_amount)
 
 
-def _rows_to_transactions(rows: list[list[str]], filename: str) -> list[dict]:
+def _rows_to_transactions(
+    rows: list[list[str]], filename: str, sign_convention: str = "positive_expense"
+) -> list[dict]:
     """
     Core parsing logic shared by CSV and Excel paths.
     Accepts a list of rows (each row is a list of string values).
@@ -306,9 +291,12 @@ def _rows_to_transactions(rows: list[list[str]], filename: str) -> list[dict]:
     merchant_idx = _find_column(headers_norm, MERCHANT_CANDIDATES)
     reference_idx = _find_column(headers_norm, REFERENCE_CANDIDATES)
 
+    # sign_flip: True means negate amounts so that positive = expense in the app.
+    # Driven entirely by the account's sign_convention setting — no majority-rule guessing.
+    sign_flip = sign_convention == "negative_expense"
+
     # If semantic detection failed, try positional heuristics on all rows.
     # This handles headerless bank exports (e.g. Wells Fargo checking).
-    sign_flip = False
     if date_idx is None or desc_idx is None:
         positional = _detect_columns_positionally(rows)
         if positional and positional.get("date_idx") is not None and positional.get("desc_idx") is not None:
@@ -321,7 +309,6 @@ def _rows_to_transactions(rows: list[list[str]], filename: str) -> list[dict]:
             credit_idx = None
             merchant_idx = None
             reference_idx = None
-            sign_flip = positional.get("sign_flip", False)
 
     if date_idx is None:
         raise ValueError(
@@ -410,15 +397,23 @@ def _rows_to_transactions(rows: list[list[str]], filename: str) -> list[dict]:
     return transactions
 
 
-def parse_csv(file_bytes: bytes, filename: str = "upload.csv") -> list[dict]:
+def parse_csv(
+    file_bytes: bytes,
+    filename: str = "upload.csv",
+    sign_convention: str = "positive_expense",
+) -> list[dict]:
     """Parse a CSV file and return transaction dicts."""
     content = file_bytes.decode("utf-8-sig", errors="replace")
     reader = csv.reader(io.StringIO(content))
     rows = list(reader)
-    return _rows_to_transactions(rows, filename)
+    return _rows_to_transactions(rows, filename, sign_convention=sign_convention)
 
 
-def parse_excel(file_bytes: bytes, filename: str = "upload.xlsx") -> list[dict]:
+def parse_excel(
+    file_bytes: bytes,
+    filename: str = "upload.xlsx",
+    sign_convention: str = "positive_expense",
+) -> list[dict]:
     """
     Parse an Excel file (.xlsx or .xls) and return transaction dicts.
     Uses the first sheet. Tries to auto-detect the header row.
@@ -433,7 +428,7 @@ def parse_excel(file_bytes: bytes, filename: str = "upload.xlsx") -> list[dict]:
     # Replace pandas NaN with empty string
     df = df.fillna("")
     rows = df.values.tolist()
-    return _rows_to_transactions(rows, filename)
+    return _rows_to_transactions(rows, filename, sign_convention=sign_convention)
 
 
 def _venmo_account_holder(rows: list[list[str]]) -> str:
@@ -594,14 +589,22 @@ def parse_venmo_csv(file_bytes: bytes, filename: str = "venmo.csv") -> list[dict
     return transactions
 
 
-def parse_file(file_bytes: bytes, filename: str, account_type: str | None = None) -> list[dict]:
+def parse_file(
+    file_bytes: bytes,
+    filename: str,
+    account_type: str | None = None,
+    sign_convention: str = "positive_expense",
+) -> list[dict]:
     """
     Auto-detect file type from extension and parse accordingly.
     Supports .csv, .xlsx, .xls. Venmo accounts use a dedicated parser.
+    sign_convention controls amount sign interpretation for non-Venmo files:
+      'positive_expense' — positive amounts are expenses (default, most banks)
+      'negative_expense' — negative amounts are expenses (some credit cards)
     """
     if account_type and account_type.lower() == "venmo":
         return parse_venmo_csv(file_bytes, filename)
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
     if ext in ("xlsx", "xls"):
-        return parse_excel(file_bytes, filename)
-    return parse_csv(file_bytes, filename)
+        return parse_excel(file_bytes, filename, sign_convention=sign_convention)
+    return parse_csv(file_bytes, filename, sign_convention=sign_convention)

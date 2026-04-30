@@ -14,13 +14,26 @@ import { getTrainingDataStats, trainCategorizer } from '../services/mlService'
 
 const ACCOUNT_TYPES = ['checking', 'savings', 'credit_card', 'investment', 'cash', 'venmo', 'other']
 
+const SIGN_CONVENTIONS = [
+  { value: 'positive_expense', label: 'Positive = Expense' },
+  { value: 'negative_expense', label: 'Negative = Expense' },
+]
+
+const defaultSignConvention = (type) =>
+  type === 'credit_card' ? 'negative_expense' : 'positive_expense'
+
 // ---------------------------------------------------------------------------
 // Account rows
 // ---------------------------------------------------------------------------
 
 function AccountRow({ account, onUpdate, onDelete }) {
   const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState({ name: account.name, type: account.type, institution: account.institution || '' })
+  const [form, setForm] = useState({
+    name: account.name,
+    type: account.type,
+    institution: account.institution || '',
+    sign_convention: account.sign_convention || defaultSignConvention(account.type),
+  })
   const [saving, setSaving] = useState(false)
 
   const handleSave = async () => {
@@ -44,6 +57,11 @@ function AccountRow({ account, onUpdate, onDelete }) {
           <input className="input py-1 text-sm" value={form.institution} onChange={(e) => setForm((p) => ({ ...p, institution: e.target.value }))} placeholder="Institution" />
         </td>
         <td className="table-cell">
+          <select className="input py-1 text-sm" value={form.sign_convention} onChange={(e) => setForm((p) => ({ ...p, sign_convention: e.target.value }))}>
+            {SIGN_CONVENTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+          </select>
+        </td>
+        <td className="table-cell">
           <div className="flex gap-1">
             <button onClick={handleSave} disabled={saving} className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded"><Check size={15} /></button>
             <button onClick={() => setEditing(false)} className="p-1.5 text-slate-400 hover:bg-slate-100 rounded"><X size={15} /></button>
@@ -53,11 +71,23 @@ function AccountRow({ account, onUpdate, onDelete }) {
     )
   }
 
+  const signLabel = account.sign_convention === 'negative_expense' ? '− Expense' : '+ Expense'
+  const isVenmo = (account.type || '').toLowerCase() === 'venmo'
+
   return (
     <tr className="hover:bg-slate-50">
       <td className="table-cell font-medium">{account.name}</td>
       <td className="table-cell text-slate-500 capitalize">{(account.type || '').replace('_', ' ')}</td>
       <td className="table-cell text-slate-500">{account.institution || '—'}</td>
+      <td className="table-cell">
+        {isVenmo ? (
+          <span className="text-xs text-slate-400 italic">N/A</span>
+        ) : (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">
+            {signLabel}
+          </span>
+        )}
+      </td>
       <td className="table-cell">
         <div className="flex items-center gap-1">
           <span className={`text-xs px-2 py-0.5 rounded-full ${account.is_active !== false ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
@@ -72,21 +102,25 @@ function AccountRow({ account, onUpdate, onDelete }) {
 }
 
 function AddAccountRow({ onAdd }) {
-  const [form, setForm] = useState({ name: '', type: 'checking', institution: '' })
+  const [form, setForm] = useState({ name: '', type: 'checking', institution: '', sign_convention: 'positive_expense' })
   const [saving, setSaving] = useState(false)
   const [open, setOpen] = useState(false)
+
+  const handleTypeChange = (newType) => {
+    setForm((p) => ({ ...p, type: newType, sign_convention: defaultSignConvention(newType) }))
+  }
 
   const handleAdd = async () => {
     if (!form.name) return
     setSaving(true)
-    try { await onAdd(form); setForm({ name: '', type: 'checking', institution: '' }); setOpen(false) }
+    try { await onAdd(form); setForm({ name: '', type: 'checking', institution: '', sign_convention: 'positive_expense' }); setOpen(false) }
     finally { setSaving(false) }
   }
 
   if (!open) {
     return (
       <tr>
-        <td colSpan={4} className="px-4 py-2">
+        <td colSpan={5} className="px-4 py-2">
           <button onClick={() => setOpen(true)} className="flex items-center gap-1 text-sm text-indigo-600 hover:text-indigo-700 font-medium">
             <Plus size={15} /> Add Account
           </button>
@@ -99,11 +133,16 @@ function AddAccountRow({ onAdd }) {
     <tr className="bg-indigo-50">
       <td className="table-cell"><input className="input py-1 text-sm" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder="Account name" autoFocus /></td>
       <td className="table-cell">
-        <select className="input py-1 text-sm" value={form.type} onChange={(e) => setForm((p) => ({ ...p, type: e.target.value }))}>
+        <select className="input py-1 text-sm" value={form.type} onChange={(e) => handleTypeChange(e.target.value)}>
           {ACCOUNT_TYPES.map((t) => <option key={t} value={t}>{t.replace('_', ' ')}</option>)}
         </select>
       </td>
       <td className="table-cell"><input className="input py-1 text-sm" value={form.institution} onChange={(e) => setForm((p) => ({ ...p, institution: e.target.value }))} placeholder="Institution" /></td>
+      <td className="table-cell">
+        <select className="input py-1 text-sm" value={form.sign_convention} onChange={(e) => setForm((p) => ({ ...p, sign_convention: e.target.value }))}>
+          {SIGN_CONVENTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+        </select>
+      </td>
       <td className="table-cell">
         <div className="flex gap-1">
           <button onClick={handleAdd} disabled={saving || !form.name} className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded"><Check size={15} /></button>
@@ -652,6 +691,7 @@ export default function Settings() {
               <th className="table-header">Name</th>
               <th className="table-header">Type</th>
               <th className="table-header">Institution</th>
+              <th className="table-header">Sign Convention</th>
               <th className="table-header">Status / Actions</th>
             </tr>
           </thead>

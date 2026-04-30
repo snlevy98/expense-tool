@@ -63,10 +63,16 @@ async def preview_import(
     account_result = await db.execute(select(Account).where(Account.id == account_id))
     account = account_result.scalar_one_or_none()
     account_type = account.type if account else None
+    sign_convention = account.sign_convention if account else "positive_expense"
 
     contents = await file.read()
     try:
-        parsed_rows = parse_file(contents, filename=file.filename or "upload.csv", account_type=account_type)
+        parsed_rows = parse_file(
+            contents,
+            filename=file.filename or "upload.csv",
+            account_type=account_type,
+            sign_convention=sign_convention,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)

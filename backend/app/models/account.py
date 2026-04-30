@@ -17,6 +17,9 @@ class Account(Base, TimestampMixin):
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     institution: Mapped[str] = mapped_column(String(100), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sign_convention: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="positive_expense"
+    )
 
     transactions: Mapped[list["Transaction"]] = relationship(  # noqa: F821
         "Transaction", back_populates="account"
