@@ -72,7 +72,6 @@ function AccountRow({ account, onUpdate, onDelete }) {
   }
 
   const signLabel = account.sign_convention === 'negative_expense' ? '− Expense' : '+ Expense'
-  const isVenmo = (account.type || '').toLowerCase() === 'venmo'
 
   return (
     <tr className="hover:bg-slate-50">
@@ -80,13 +79,9 @@ function AccountRow({ account, onUpdate, onDelete }) {
       <td className="table-cell text-slate-500 capitalize">{(account.type || '').replace('_', ' ')}</td>
       <td className="table-cell text-slate-500">{account.institution || '—'}</td>
       <td className="table-cell">
-        {isVenmo ? (
-          <span className="text-xs text-slate-400 italic">N/A</span>
-        ) : (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">
-            {signLabel}
-          </span>
-        )}
+        <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">
+          {signLabel}
+        </span>
       </td>
       <td className="table-cell">
         <div className="flex items-center gap-1">
