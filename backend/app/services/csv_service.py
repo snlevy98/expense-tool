@@ -487,6 +487,7 @@ def parse_venmo_csv(file_bytes: bytes, filename: str = "venmo.csv") -> list[dict
 
     id_idx = _col("id")
     dt_idx = _col("datetime")
+    type_idx = _col("type")
     note_idx = _col("note")
     from_idx = _col("from")
     to_idx = _col("to")
@@ -517,8 +518,17 @@ def parse_venmo_csv(file_bytes: bytes, filename: str = "venmo.csv") -> list[dict
         if not raw_dt:
             continue
 
+        txn_type = (
+            row[type_idx].strip().lower() if type_idx is not None and type_idx < len(row) else ""
+        )
+        is_balance_transfer = txn_type in ("standard transfer", "instant transfer")
+
+        # Standard/instant transfers use "Issued" status, not "Complete" — allow both.
+        # All other unrecognised statuses are skipped.
         if status_idx is not None and status_idx < len(row):
-            if row[status_idx].strip().lower() not in ("complete", ""):
+            status_val = row[status_idx].strip().lower()
+            allowed = ("complete", "", "issued") if is_balance_transfer else ("complete", "")
+            if status_val not in allowed:
                 continue
 
         try:
@@ -537,12 +547,6 @@ def parse_venmo_csv(file_bytes: bytes, filename: str = "venmo.csv") -> list[dict
         # Venmo "+" = money received (income) → app negative; "–" = money sent (expense) → app positive
         amount = -_parse_amount(amount_raw)
 
-        merchant_name = (
-            _venmo_other_person(from_name, to_name, account_holder)
-            if account_holder
-            else (to_name or from_name)
-        )
-
         funding_source = (
             row[funding_source_idx].strip()
             if funding_source_idx is not None and funding_source_idx < len(row)
@@ -553,16 +557,31 @@ def parse_venmo_csv(file_bytes: bytes, filename: str = "venmo.csv") -> list[dict
             if destination_idx is not None and destination_idx < len(row)
             else ""
         )
-        # If funding source or destination is a real bank account (not Venmo balance),
-        # this transaction also appears on the linked bank/card statement.
-        is_bank_transfer = (
-            (bool(funding_source) and funding_source.lower() != "venmo balance") or
-            (bool(destination) and destination.lower() != "venmo balance")
-        )
+
+        if is_balance_transfer:
+            # Balance transfers (Venmo → bank) have no From/To person — use the
+            # destination bank name as the merchant and never attempt bank-matching.
+            bank_label = destination or funding_source or "Venmo Transfer"
+            merchant_name = bank_label
+            raw_desc = f"Transfer to {bank_label}" if destination else f"Transfer from {bank_label}"
+            is_bank_transfer = False
+        else:
+            merchant_name = (
+                _venmo_other_person(from_name, to_name, account_holder)
+                if account_holder
+                else (to_name or from_name)
+            )
+            raw_desc = note or merchant_name
+            # If funding source or destination is a real bank account (not Venmo balance),
+            # this payment also appears on the linked bank/card statement.
+            is_bank_transfer = (
+                (bool(funding_source) and funding_source.lower() != "venmo balance") or
+                (bool(destination) and destination.lower() != "venmo balance")
+            )
 
         transactions.append(
             {
-                "raw_description": note or merchant_name,
+                "raw_description": raw_desc,
                 "merchant_name": merchant_name or note or txn_id,
                 "amount": amount,
                 "transaction_date": txn_date,
