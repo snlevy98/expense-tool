@@ -14,6 +14,15 @@ class DashboardSummary(BaseModel):
     savings: Decimal      # income − investments − spent
 
 
+class DashboardSubcategoryRow(BaseModel):
+    subcategory_id: str
+    subcategory_name: str
+    budget: Decimal
+    spent: Decimal
+    remaining: Decimal
+    status: str  # "green", "yellow", "red"
+
+
 class DashboardCategoryRow(BaseModel):
     category_id: str
     category_name: str
@@ -22,6 +31,7 @@ class DashboardCategoryRow(BaseModel):
     spent: Decimal
     remaining: Decimal
     status: str  # "green", "yellow", "red"
+    subcategories: list[DashboardSubcategoryRow] = []
 
 
 class DashboardResponse(BaseModel):

@@ -16,6 +16,7 @@ from app.models.transaction import Transaction
 from app.schemas.report import (
     DashboardCategoryRow,
     DashboardResponse,
+    DashboardSubcategoryRow,
     DashboardSummary,
     TopMerchantRow,
     TrendPoint,
@@ -42,9 +43,11 @@ def _dashboard_status(spent: Decimal, budget: Decimal) -> str:
 async def get_dashboard(
     db: AsyncSession, month: int, year: int
 ) -> DashboardResponse:
-    # Load all active categories
+    # Load all active categories with their active subcategories
     cat_result = await db.execute(
-        select(Category).where(Category.is_active == True)  # noqa: E712
+        select(Category)
+        .where(Category.is_active == True)  # noqa: E712
+        .options(selectinload(Category.subcategories))
     )
     categories = cat_result.scalars().all()
 
@@ -61,14 +64,21 @@ async def get_dashboard(
     # Non-excluded categories only appear in the budget table
     budgeted_categories = [c for c in categories if not c.budget_excluded]
 
-    # Load budgets for the month (non-excluded categories only)
+    # Load budgets for the month
     budget_result = await db.execute(
         select(Budget).where(Budget.month == month, Budget.year == year)
     )
-    # Sum budgets per category (subcategory rows count toward the category total)
+    all_budgets = budget_result.scalars().all()
+
+    # Category total budgets (subcategory rows already roll up into the category total
+    # because each subcategory budget row has a category_id)
     budget_map: dict[uuid.UUID, Decimal] = {}
-    for b in budget_result.scalars().all():
+    # Subcategory-level budgets
+    subcat_budget_map: dict[uuid.UUID, Decimal] = {}
+    for b in all_budgets:
         budget_map[b.category_id] = budget_map.get(b.category_id, Decimal("0")) + Decimal(str(b.amount))
+        if b.subcategory_id:
+            subcat_budget_map[b.subcategory_id] = Decimal(str(b.amount))
 
     # Date range for this month
     start_date = date(year, month, 1)
@@ -102,7 +112,6 @@ async def get_dashboard(
     investments = investments_raw if investments_raw > 0 else Decimal("0")
 
     # Spent: positive-amount (expense) transactions for non-excluded categories only
-    # We sum positive amounts for budgeted categories
     spent_result = await db.execute(
         select(Transaction.category_id, func.sum(Transaction.amount).label("total"))
         .where(
@@ -117,6 +126,28 @@ async def get_dashboard(
     )
     spend_map: dict[uuid.UUID, Decimal] = {
         row.category_id: Decimal(str(row.total)) for row in spent_result.all()
+    }
+
+    # Subcategory-level spending
+    subcat_spend_result = await db.execute(
+        select(
+            Transaction.subcategory_id,
+            func.sum(Transaction.amount).label("total"),
+        )
+        .where(
+            and_(
+                Transaction.transaction_date >= start_date,
+                Transaction.transaction_date <= end_date,
+                Transaction.amount > 0,
+                Transaction.category_id.in_([c.id for c in budgeted_categories]),
+                Transaction.subcategory_id.isnot(None),
+            )
+        )
+        .group_by(Transaction.subcategory_id)
+    )
+    subcat_spend_map: dict[uuid.UUID, Decimal] = {
+        row.subcategory_id: Decimal(str(row.total))
+        for row in subcat_spend_result.all()
     }
 
     total_spent_budgeted = sum(spend_map.values(), Decimal("0"))
@@ -153,6 +184,23 @@ async def get_dashboard(
         total_budget += budget
         total_spent += spent
 
+        # Build subcategory breakdown rows
+        active_subs = [s for s in cat.subcategories if s.is_active]
+        subcat_rows: list[DashboardSubcategoryRow] = []
+        for sub in active_subs:
+            sub_budget = subcat_budget_map.get(sub.id, Decimal("0"))
+            sub_spent = subcat_spend_map.get(sub.id, Decimal("0"))
+            subcat_rows.append(
+                DashboardSubcategoryRow(
+                    subcategory_id=str(sub.id),
+                    subcategory_name=sub.name,
+                    budget=sub_budget,
+                    spent=sub_spent,
+                    remaining=sub_budget - sub_spent,
+                    status=_dashboard_status(sub_spent, sub_budget),
+                )
+            )
+
         rows.append(
             DashboardCategoryRow(
                 category_id=str(cat.id),
@@ -162,6 +210,7 @@ async def get_dashboard(
                 spent=spent,
                 remaining=remaining_cat,
                 status=status,
+                subcategories=subcat_rows,
             )
         )
 

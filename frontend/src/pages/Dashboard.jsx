@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useAppStore } from '../store/appStore'
 import MonthSwitcher from '../components/MonthSwitcher'
 import BudgetStatusBadge from '../components/BudgetStatusBadge'
@@ -37,6 +38,16 @@ export default function Dashboard() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [expandedCategories, setExpandedCategories] = useState(new Set())
+
+  const toggleCategory = (categoryId) => {
+    setExpandedCategories((prev) => {
+      const next = new Set(prev)
+      if (next.has(categoryId)) next.delete(categoryId)
+      else next.add(categoryId)
+      return next
+    })
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -172,35 +183,72 @@ export default function Dashboard() {
                   </tr>
                 ) : (
                   <>
-                    {(data?.rows ?? []).map((row) => (
-                      <tr key={row.category_name} className="hover:bg-slate-50">
-                        <td className="table-cell">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className="w-2.5 h-2.5 rounded-full shrink-0"
-                              style={{ backgroundColor: row.category_color || '#94a3b8' }}
-                            />
-                            <span className="font-medium">{row.category_name}</span>
-                          </div>
-                        </td>
-                        <td className="table-cell text-right tabular-nums">{formatCurrency(row.budget)}</td>
-                        <td className="table-cell text-right tabular-nums font-medium">{formatCurrency(row.spent)}</td>
-                        <td className={`table-cell text-right tabular-nums font-medium ${row.remaining < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                          {formatCurrency(row.remaining)}
-                        </td>
-                        <td className="table-cell">
-                          <BudgetStatusBadge status={row.status} />
-                        </td>
-                      </tr>
-                    ))}
+                    {(data?.rows ?? []).map((row) => {
+                      const hasSubs = (row.subcategories ?? []).length > 0
+                      const isExpanded = expandedCategories.has(row.category_id)
+                      return (
+                        <>
+                          <tr
+                            key={row.category_id}
+                            className={`${hasSubs ? 'cursor-pointer' : ''} hover:bg-slate-50`}
+                            onClick={() => hasSubs && toggleCategory(row.category_id)}
+                          >
+                            <td className="table-cell">
+                              <div className="flex items-center gap-2">
+                                {hasSubs ? (
+                                  isExpanded
+                                    ? <ChevronDown size={14} className="text-slate-400 shrink-0" />
+                                    : <ChevronRight size={14} className="text-slate-400 shrink-0" />
+                                ) : (
+                                  <span className="w-3.5 shrink-0" />
+                                )}
+                                <span
+                                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                                  style={{ backgroundColor: row.category_color || '#94a3b8' }}
+                                />
+                                <span className="font-medium">{row.category_name}</span>
+                              </div>
+                            </td>
+                            <td className="table-cell text-right tabular-nums">{formatCurrency(row.budget)}</td>
+                            <td className="table-cell text-right tabular-nums font-medium">{formatCurrency(row.spent)}</td>
+                            <td className={`table-cell text-right tabular-nums font-medium ${parseFloat(row.remaining) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                              {formatCurrency(row.remaining)}
+                            </td>
+                            <td className="table-cell">
+                              <BudgetStatusBadge status={row.status} />
+                            </td>
+                          </tr>
+
+                          {/* Subcategory rows */}
+                          {isExpanded && (row.subcategories ?? []).map((sub) => (
+                            <tr key={sub.subcategory_id} className="bg-slate-50/60">
+                              <td className="table-cell">
+                                <div className="flex items-center gap-2 pl-8">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0" />
+                                  <span className="text-slate-600">{sub.subcategory_name}</span>
+                                </div>
+                              </td>
+                              <td className="table-cell text-right tabular-nums text-slate-500">{formatCurrency(sub.budget)}</td>
+                              <td className="table-cell text-right tabular-nums font-medium text-slate-700">{formatCurrency(sub.spent)}</td>
+                              <td className={`table-cell text-right tabular-nums font-medium ${parseFloat(sub.remaining) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                                {formatCurrency(sub.remaining)}
+                              </td>
+                              <td className="table-cell">
+                                <BudgetStatusBadge status={sub.status} />
+                              </td>
+                            </tr>
+                          ))}
+                        </>
+                      )
+                    })}
                     {/* Totals row */}
                     {data && (
                       <tr className="bg-slate-50 font-semibold border-t border-slate-200">
-                        <td className="table-cell text-slate-700">Total</td>
+                        <td className="table-cell text-slate-700 pl-9">Total</td>
                         <td className="table-cell text-right tabular-nums">{formatCurrency(data.total_budget)}</td>
                         <td className="table-cell text-right tabular-nums">{formatCurrency(data.total_spent)}</td>
-                        <td className={`table-cell text-right tabular-nums ${(data.total_budget - data.total_spent) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                          {formatCurrency(data.total_budget - data.total_spent)}
+                        <td className={`table-cell text-right tabular-nums ${(parseFloat(data.total_budget) - parseFloat(data.total_spent)) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                          {formatCurrency(parseFloat(data.total_budget) - parseFloat(data.total_spent))}
                         </td>
                         <td className="table-cell" />
                       </tr>
