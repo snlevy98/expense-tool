@@ -193,14 +193,14 @@ function YearToDate() {
               <tr><td colSpan={14} className="px-4 py-8 text-center text-slate-400">No data for {year}.</td></tr>
             ) : (
               data.map((row) => {
-                const total = (row.months ?? []).reduce((s, m) => s + (m.spent || 0), 0)
+                const total = (row.months ?? []).reduce((s, m) => s + (parseFloat(m.spent) || 0), 0)
                 return (
                   <tr key={row.category_name} className="hover:bg-slate-50">
                     <td className="table-cell font-medium sticky left-0 bg-white hover:bg-slate-50">{row.category_name}</td>
                     {months.map((m) => {
                       const monthData = (row.months ?? []).find((md) => md.month === m)
-                      const spent = monthData?.spent ?? 0
-                      const budget = monthData?.budget ?? 0
+                      const spent = parseFloat(monthData?.spent) || 0
+                      const budget = parseFloat(monthData?.budget) || 0
                       const over = budget > 0 && spent > budget
                       return (
                         <td key={m} className={`table-cell text-right tabular-nums ${over ? 'text-red-600' : 'text-slate-700'}`}>
