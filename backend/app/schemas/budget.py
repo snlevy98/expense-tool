@@ -58,3 +58,24 @@ class BudgetUpsert(BaseModel):
 
 class BudgetDefaultUpdate(BaseModel):
     default_amount: Decimal
+
+
+class BudgetSuggestRequest(BaseModel):
+    allocation: Decimal
+    months_back: int = 3
+
+
+class BudgetSuggestionItem(BaseModel):
+    id: str
+    subcategory_id: uuid.UUID | None
+    subcategory_name: str | None
+    category_id: uuid.UUID
+    category_name: str
+    monthly_avg: Decimal
+    suggested_amount: Decimal
+
+
+class BudgetSuggestResponse(BaseModel):
+    suggestions: list[BudgetSuggestionItem]
+    total_suggested: Decimal
+    allocation: Decimal

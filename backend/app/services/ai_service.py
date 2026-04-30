@@ -280,6 +280,62 @@ Output raw JSON only — no explanation, no markdown."""
         return []
 
 
+async def suggest_budget(
+    items: list[dict],
+    allocation: float,
+    months_back: int,
+) -> dict[str, float]:
+    """
+    Ask Groq to allocate a monthly budget across subcategories.
+    items: list of {id, category_name, subcategory_name, monthly_avg}
+    Returns {id → suggested_amount}.
+    Raises RateLimitError on 429/503, propagates other exceptions.
+    """
+    items_text = json.dumps(
+        [
+            {
+                "id": item["id"],
+                "category": item["category_name"],
+                "subcategory": item.get("subcategory_name") or item["category_name"],
+                "monthly_avg": round(float(item["monthly_avg"]), 2),
+            }
+            for item in items
+        ],
+        indent=2,
+    )
+
+    prompt = f"""You are a personal finance budget advisor.
+
+The user wants to allocate ${allocation:.2f}/month across their expense subcategories.
+
+Their average monthly spending per subcategory over the last {months_back} months:
+{items_text}
+
+Create a monthly budget:
+- Fixed/necessary expenses (rent, utilities, insurance, debt, car payments, recurring subscriptions, medical) must stay at or very near their historical average — do not cut these
+- Discretionary spending (dining, bars, entertainment, hobbies, shopping, travel, beauty, etc.) should scale proportionally to fit the remaining allocation
+- If historical spending is below the allocation, distribute the surplus proportionally to discretionary categories
+- All amounts must be >= 0
+- The sum of all suggested amounts must equal exactly {allocation:.2f}
+
+Return ONLY a JSON object mapping each item's "id" to the suggested monthly amount (number):
+{{"id_value_here": 150.00, ...}}
+Include all items. No markdown, no explanation."""
+
+    try:
+        raw = await _call_groq(prompt)
+        raw = _strip_fences(raw)
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {k: max(0.0, float(v)) for k, v in parsed.items() if isinstance(v, (int, float))}
+        raise ValueError(f"Unexpected budget suggestion response shape: {type(parsed)}")
+    except RateLimitError:
+        raise
+    except Exception:
+        logger.exception("Budget suggestion failed")
+        raise
+
+
 async def suggest_categories(
     transactions: list[dict], categories: list[dict], examples_text: str = ""
 ) -> list[dict]:

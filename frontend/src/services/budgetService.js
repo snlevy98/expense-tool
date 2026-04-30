@@ -33,3 +33,11 @@ export const fillFromLastMonth = async (month, year) => {
   })
   return data
 }
+
+export const suggestBudget = async (allocation, monthsBack = 3) => {
+  const { data } = await api.post('/api/budgets/suggest', {
+    allocation,
+    months_back: monthsBack,
+  })
+  return data
+}

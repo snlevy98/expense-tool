@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { Check, ChevronDown, ChevronRight, Copy, Loader2, Pencil } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Copy, Loader2, Pencil, Sparkles, X } from 'lucide-react'
 import MonthSwitcher from '../components/MonthSwitcher'
 import { useBudget } from '../hooks/useBudget'
 import { useAppStore } from '../store/appStore'
 import { formatCurrency } from '../utils/currency'
+import { suggestBudget } from '../services/budgetService'
 
 // ── Editable amount cell ────────────────────────────────────────────────────
 
@@ -202,6 +203,197 @@ function CategoryDirectRow({ catBudget, onSave }) {
   )
 }
 
+// ── Auto-suggest modal ───────────────────────────────────────────────────────
+
+function AutoSuggestModal({ poolAmount, onApply, onClose }) {
+  const [allocation, setAllocation] = useState(String(Math.round(poolAmount || 0)))
+  const [monthsBack, setMonthsBack] = useState(3)
+  const [suggestions, setSuggestions] = useState(null)
+  const [draftAmounts, setDraftAmounts] = useState({})
+  const [loading, setLoading] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const [error, setError] = useState(null)
+
+  const handleGenerate = async () => {
+    const alloc = parseFloat(allocation)
+    if (!alloc || alloc <= 0) { setError('Enter a valid allocation amount.'); return }
+    setError(null)
+    setLoading(true)
+    try {
+      const data = await suggestBudget(alloc, monthsBack)
+      setSuggestions(data.suggestions)
+      const drafts = {}
+      for (const s of data.suggestions) drafts[s.id] = String(parseFloat(s.suggested_amount).toFixed(2))
+      setDraftAmounts(drafts)
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Failed to generate suggestions.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const totalDraft = suggestions
+    ? suggestions.reduce((sum, s) => sum + (parseFloat(draftAmounts[s.id]) || 0), 0)
+    : 0
+  const diff = parseFloat(allocation || 0) - totalDraft
+
+  const handleApply = async () => {
+    if (!suggestions) return
+    setApplying(true)
+    try {
+      await onApply(suggestions.map((s) => ({
+        category_id: s.category_id,
+        subcategory_id: s.subcategory_id,
+        amount: parseFloat(draftAmounts[s.id]) || 0,
+      })))
+      onClose()
+    } catch (err) {
+      setError(err.message || 'Failed to apply budgets.')
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  // Group suggestions by category for display
+  const grouped = suggestions
+    ? suggestions.reduce((acc, s) => {
+        const key = s.category_id
+        if (!acc[key]) acc[key] = { category_name: s.category_name, items: [] }
+        acc[key].items.push(s)
+        return acc
+      }, {})
+    : null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+          <div className="flex items-center gap-2">
+            <Sparkles size={18} className="text-indigo-500" />
+            <h2 className="font-semibold text-slate-800 text-base">AI Budget Suggestion</h2>
+          </div>
+          <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors">
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Config */}
+        <div className="px-6 py-4 border-b border-slate-100 flex flex-wrap items-end gap-4">
+          <div>
+            <label className="label text-xs">Monthly allocation ($)</label>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              className="input w-36 py-1.5 text-sm"
+              value={allocation}
+              onChange={(e) => setAllocation(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="label text-xs">Months of history</label>
+            <select
+              className="input py-1.5 text-sm"
+              value={monthsBack}
+              onChange={(e) => setMonthsBack(Number(e.target.value))}
+            >
+              {[1,2,3,4,5,6].map((n) => (
+                <option key={n} value={n}>{n} month{n !== 1 ? 's' : ''}</option>
+              ))}
+            </select>
+          </div>
+          <button
+            onClick={handleGenerate}
+            disabled={loading}
+            className="btn-primary py-1.5 text-sm flex items-center gap-1.5"
+          >
+            {loading ? <><Loader2 size={14} className="animate-spin" /> Generating…</> : <><Sparkles size={14} /> Generate</>}
+          </button>
+        </div>
+
+        {error && (
+          <div className="mx-6 mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs">
+            {error}
+          </div>
+        )}
+
+        {/* Suggestions table */}
+        {grouped && (
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left">
+                  <th className="pb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Subcategory</th>
+                  <th className="pb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide text-right pr-4">Avg/mo</th>
+                  <th className="pb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide text-right">Suggested</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {Object.values(grouped).map((group) => (
+                  <>
+                    <tr key={group.category_name} className="bg-slate-50">
+                      <td colSpan={3} className="py-1.5 px-1 text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                        {group.category_name}
+                      </td>
+                    </tr>
+                    {group.items.map((s) => (
+                      <tr key={s.id} className="hover:bg-slate-50">
+                        <td className="py-2 pl-3 text-slate-700">
+                          {s.subcategory_name || s.category_name}
+                        </td>
+                        <td className="py-2 pr-4 text-right text-slate-400 tabular-nums">
+                          {formatCurrency(parseFloat(s.monthly_avg))}
+                        </td>
+                        <td className="py-2 text-right">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            className="input w-24 py-0.5 text-sm text-right tabular-nums"
+                            value={draftAmounts[s.id] ?? ''}
+                            onChange={(e) => setDraftAmounts((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Footer */}
+        {grouped && (
+          <div className="px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-4">
+            <div className="text-sm">
+              <span className="text-slate-600">Total: </span>
+              <span className="font-semibold text-slate-800 tabular-nums">{formatCurrency(totalDraft)}</span>
+              {Math.abs(diff) >= 0.01 && (
+                <span className={`ml-3 text-xs font-medium ${diff > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                  {diff > 0 ? `${formatCurrency(diff)} under` : `${formatCurrency(Math.abs(diff))} over`} allocation
+                </span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={onClose} className="btn-secondary text-sm">Cancel</button>
+              <button
+                onClick={handleApply}
+                disabled={applying}
+                className="btn-primary text-sm flex items-center gap-1.5"
+              >
+                {applying ? <><Loader2 size={14} className="animate-spin" /> Applying…</> : <><Check size={14} /> Apply All</>}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export default function Budgets() {
@@ -220,6 +412,7 @@ export default function Budgets() {
 
   const [filling, setFilling] = useState(false)
   const [fillResult, setFillResult] = useState(null)
+  const [suggestOpen, setSuggestOpen] = useState(false)
 
   const handleFill = async () => {
     setFilling(true)
@@ -235,6 +428,12 @@ export default function Budgets() {
   }
 
   const isOverBudget = poolInfo.leftover < 0
+
+  const handleApplySuggestions = async (items) => {
+    for (const item of items) {
+      await saveBudget(item.category_id, item.subcategory_id, item.amount)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -280,15 +479,23 @@ export default function Budgets() {
             )}
           </span>
 
-          <button
-            onClick={handleFill}
-            disabled={filling}
-            className="btn-secondary ml-auto"
-          >
-            {filling
-              ? <><Loader2 size={14} className="animate-spin" /> Filling…</>
-              : <><Copy size={14} /> Fill from Last Month</>}
-          </button>
+          <div className="flex gap-2 ml-auto">
+            <button
+              onClick={() => setSuggestOpen(true)}
+              className="btn-secondary flex items-center gap-1.5"
+            >
+              <Sparkles size={14} className="text-indigo-500" /> Auto-suggest
+            </button>
+            <button
+              onClick={handleFill}
+              disabled={filling}
+              className="btn-secondary"
+            >
+              {filling
+                ? <><Loader2 size={14} className="animate-spin" /> Filling…</>
+                : <><Copy size={14} /> Fill from Last Month</>}
+            </button>
+          </div>
         </div>
 
         {fillResult !== null && (
@@ -358,6 +565,14 @@ export default function Budgets() {
           </tbody>
         </table>
       </div>
+
+      {suggestOpen && (
+        <AutoSuggestModal
+          poolAmount={poolInfo.pool_amount}
+          onApply={handleApplySuggestions}
+          onClose={() => setSuggestOpen(false)}
+        />
+      )}
     </div>
   )
 }
