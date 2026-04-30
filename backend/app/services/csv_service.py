@@ -563,7 +563,7 @@ def parse_venmo_csv(file_bytes: bytes, filename: str = "venmo.csv") -> list[dict
             # destination bank name as the merchant and never attempt bank-matching.
             bank_label = destination or funding_source or "Venmo Transfer"
             merchant_name = bank_label
-            raw_desc = f"Transfer to {bank_label}" if destination else f"Transfer from {bank_label}"
+            raw_desc = f"Venmo: Transfer to {bank_label}" if destination else f"Venmo: Transfer from {bank_label}"
             is_bank_transfer = False
         else:
             merchant_name = (
@@ -571,7 +571,7 @@ def parse_venmo_csv(file_bytes: bytes, filename: str = "venmo.csv") -> list[dict
                 if account_holder
                 else (to_name or from_name)
             )
-            raw_desc = note or merchant_name
+            raw_desc = f"Venmo: {note}" if note else f"Venmo: {merchant_name}"
             # If funding source or destination is a real bank account (not Venmo balance),
             # this payment also appears on the linked bank/card statement.
             is_bank_transfer = (
