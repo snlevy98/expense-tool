@@ -13,6 +13,7 @@ export default function EditTransactionModal({ transaction, onSave, onClose }) {
     raw_description: '',
     transaction_date: '',
     amount: '',
+    is_expense: true,
     category_id: '',
     subcategory_id: '',
     account_id: '',
@@ -23,11 +24,13 @@ export default function EditTransactionModal({ transaction, onSave, onClose }) {
 
   useEffect(() => {
     if (transaction) {
+      const raw = parseFloat(transaction.amount)
       setForm({
         merchant_name: transaction.merchant_name || '',
         raw_description: transaction.raw_description || '',
         transaction_date: toInputDate(transaction.transaction_date),
-        amount: transaction.amount != null ? String(Math.abs(parseFloat(transaction.amount))) : '',
+        amount: transaction.amount != null ? String(Math.abs(raw)) : '',
+        is_expense: raw >= 0,
         category_id: transaction.category_id || '',
         subcategory_id: transaction.subcategory_id || '',
         account_id: transaction.account_id || '',
@@ -51,9 +54,10 @@ export default function EditTransactionModal({ transaction, onSave, onClose }) {
     setSaving(true)
     setError(null)
     try {
+      const absAmount = Math.abs(parseFloat(form.amount))
       await onSave(transaction.id, {
         ...form,
-        amount: parseFloat(form.amount),
+        amount: form.is_expense ? absAmount : -absAmount,
         category_id: form.category_id || null,
         subcategory_id: form.subcategory_id || null,
         account_id: form.account_id || null,
@@ -119,16 +123,30 @@ export default function EditTransactionModal({ transaction, onSave, onClose }) {
             </div>
             <div>
               <label className="label">Amount</label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                className="input"
-                value={form.amount}
-                onChange={(e) => handleChange('amount', e.target.value)}
-                placeholder="0.00"
-                required
-              />
+              <div className="flex rounded-lg border border-slate-300 overflow-hidden focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-indigo-500">
+                <button
+                  type="button"
+                  onClick={() => handleChange('is_expense', !form.is_expense)}
+                  className={`px-3 text-xs font-semibold shrink-0 border-r border-slate-300 transition-colors ${
+                    form.is_expense
+                      ? 'bg-red-50 text-red-600 hover:bg-red-100'
+                      : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
+                  }`}
+                  title="Click to flip sign"
+                >
+                  {form.is_expense ? '+ Expense' : '− Income'}
+                </button>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="flex-1 px-3 py-2 text-sm outline-none bg-white"
+                  value={form.amount}
+                  onChange={(e) => handleChange('amount', e.target.value)}
+                  placeholder="0.00"
+                  required
+                />
+              </div>
             </div>
           </div>
 
