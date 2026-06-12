@@ -1,64 +1,110 @@
 import uuid
+from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class SubcategoryBudgetOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+# ---------------------------------------------------------------------------
+# Dashboard payload (FR-6.1–6.3)
+# ---------------------------------------------------------------------------
 
-    id: uuid.UUID
+class SubcategoryBudgetRow(BaseModel):
+    budget_id: uuid.UUID
     subcategory_id: uuid.UUID
     subcategory_name: str
-    category_id: uuid.UUID
-    month: int
-    year: int
-    amount: Decimal
+    cap: Decimal
+    spent: Decimal              # netted (FR-4.1), exclusions filtered (FR-4.2)
+    remaining: Decimal          # cap - spent (saved balance never raises it, FR-3.3)
+    saved_balance: Decimal
+    locked: bool
+    overage: Decimal            # max(0, spent - cap)
+    covered_overage: Decimal    # min(overage, saved_balance) — provisional (FR-3.2)
+    net_overage: Decimal        # overage - covered_overage
+    status: Literal["on_track", "approaching", "covered", "over"]
 
 
-class CategoryBudgetOut(BaseModel):
+class CategoryBudgetGroup(BaseModel):
     category_id: uuid.UUID
     category_name: str
     category_color: str
-    has_subcategories: bool
-    # Sum of subcategory amounts (has_subcategories=True) or direct amount (False)
-    total_amount: Decimal
-    # Only set when has_subcategories=False (the actual budget row id)
-    budget_id: uuid.UUID | None = None
-    month: int
-    year: int
-    subcategory_budgets: list[SubcategoryBudgetOut] = []
+    total_cap: Decimal
+    total_spent: Decimal
+    total_remaining: Decimal
+    total_saved: Decimal
+    subcategories: list[SubcategoryBudgetRow]
 
 
-class BudgetListResponse(BaseModel):
-    """Full budget list response including pool summary."""
-    budgets: list[CategoryBudgetOut]
-    pool_pct: Decimal
-    pool_amount: Decimal       # last_month_income × pool_pct
-    last_month_income: Decimal
-    allocated: Decimal         # sum of all category budget amounts this month
-    leftover: Decimal          # pool_amount − allocated
-
-
-class BudgetSettingsOut(BaseModel):
-    pool_pct: Decimal
-
-
-class BudgetSettingsUpdate(BaseModel):
-    pool_pct: Decimal  # expected range 0.01–1.00
-
-
-class BudgetUpsert(BaseModel):
+class UnbudgetedSubcategory(BaseModel):
     category_id: uuid.UUID
-    subcategory_id: uuid.UUID | None = None
+    category_name: str
+    subcategory_id: uuid.UUID
+    subcategory_name: str
+
+
+class BudgetSummary(BaseModel):
+    total_budgeted: Decimal
+    total_spent: Decimal
+    total_remaining: Decimal
+    coverage_drawn: Decimal       # sum of provisional covered overages
+    net_overage_count: int        # subcategories with net overage (FR-6.3)
+
+
+class BudgetDashboardResponse(BaseModel):
     month: int
     year: int
-    amount: Decimal
+    is_closed: bool               # caps/locks read-only (FR-2.4)
+    summary: BudgetSummary
+    categories: list[CategoryBudgetGroup]
+    unbudgeted: list[UnbudgetedSubcategory]
 
 
-class BudgetDefaultUpdate(BaseModel):
-    default_amount: Decimal
+# ---------------------------------------------------------------------------
+# Mutations
+# ---------------------------------------------------------------------------
 
+class CapUpdate(BaseModel):
+    amount: Decimal = Field(gt=0)  # FR-1.2
+
+
+class LockUpdate(BaseModel):
+    locked: bool
+
+
+class SavedBalanceReset(BaseModel):
+    value: Decimal = Field(default=Decimal("0"), ge=0)  # FR-3.4
+
+
+class SavedBalanceOut(BaseModel):
+    subcategory_id: uuid.UUID
+    subcategory_name: str
+    balance: Decimal
+
+
+class BudgetExclusionUpdate(BaseModel):
+    budget_excluded: bool
+
+
+class ExclusionRuleCreate(BaseModel):
+    rule_type: Literal["category", "subcategory", "merchant_match"]
+    match_value: str = Field(min_length=1, max_length=200)
+    active: bool = True
+
+
+class ExclusionRuleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    rule_type: str
+    match_value: str
+    active: bool
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# AI suggestions — legacy shape, replaced in the suggestions-v2 chunk
+# ---------------------------------------------------------------------------
 
 class BudgetSuggestRequest(BaseModel):
     allocation: Decimal

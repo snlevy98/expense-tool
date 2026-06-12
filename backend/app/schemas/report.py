@@ -7,8 +7,8 @@ from app.schemas.transaction import TransactionOut
 
 class DashboardSummary(BaseModel):
     income: Decimal       # this month's Income-category transactions (receipts)
-    budget: Decimal       # last month's income × pool_pct
-    spent: Decimal        # non-excluded expense spending this month
+    budget: Decimal       # total budgeted caps for the month (pool model retired)
+    spent: Decimal        # netted spending this month (refunds reduce it, FR-4.1)
     remaining: Decimal    # budget − spent
     investments: Decimal  # Investments-category spending this month
     savings: Decimal      # income − investments − spent

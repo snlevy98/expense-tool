@@ -1,9 +1,14 @@
 """
-Business logic for budgets: auto-seed, upsert, pool settings, and fill-from-last-month.
+Business logic for envelope budgets: dashboard payload, cap/lock mutations,
+unbudgeting, saved balances, and exclusion rules.
+
+Opt-in semantics (FR-1.1): a budgets row's presence means the subcategory is
+budgeted. Nothing is auto-seeded. Envelope math only reads subcategory rows;
+legacy category-level rows (subcategory_id IS NULL) are historical-report
+data only.
 """
 
 import uuid
-from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import and_, func, select
@@ -11,47 +16,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.budget import Budget
-from app.models.budget_default import BudgetDefault
-from app.models.budget_settings import BudgetSettings
 from app.models.category import Category
+from app.models.exclusion_rule import BudgetExclusionRule
+from app.models.saved_balance import SavedBalance, SavedBalanceEvent
+from app.models.subcategory import Subcategory
 from app.models.transaction import Transaction
 from app.schemas.budget import (
-    BudgetDefaultUpdate,
-    BudgetListResponse,
-    BudgetSettingsUpdate,
-    BudgetUpsert,
-    CategoryBudgetOut,
-    SubcategoryBudgetOut,
+    BudgetDashboardResponse,
+    BudgetSummary,
+    CategoryBudgetGroup,
+    ExclusionRuleCreate,
+    SavedBalanceOut,
+    SubcategoryBudgetRow,
+    UnbudgetedSubcategory,
 )
+from app.services import budget_lifecycle, budget_math
+from app.services.budget_math import ZERO
 
 
 # ---------------------------------------------------------------------------
-# Budget Settings helpers
-# ---------------------------------------------------------------------------
-
-async def get_budget_settings(db: AsyncSession) -> BudgetSettings:
-    """Return the single BudgetSettings row, creating it if absent."""
-    result = await db.execute(select(BudgetSettings).limit(1))
-    settings = result.scalar_one_or_none()
-    if settings is None:
-        settings = BudgetSettings(id=uuid.uuid4(), pool_pct=Decimal("0.8000"))
-        db.add(settings)
-        await db.flush()
-        await db.refresh(settings)
-    return settings
-
-
-async def update_pool_pct(db: AsyncSession, body: BudgetSettingsUpdate) -> BudgetSettings:
-    """Update the pool_pct on the single BudgetSettings row."""
-    settings = await get_budget_settings(db)
-    settings.pool_pct = body.pool_pct
-    await db.flush()
-    await db.refresh(settings)
-    return settings
-
-
-# ---------------------------------------------------------------------------
-# Income helpers
+# Income helper (kept for AI-suggestion inputs, FR-5.2)
 # ---------------------------------------------------------------------------
 
 async def get_last_month_income(db: AsyncSession, month: int, year: int) -> Decimal:
@@ -59,17 +43,8 @@ async def get_last_month_income(db: AsyncSession, month: int, year: int) -> Deci
     Return total income for the month BEFORE (month, year).
     Income = abs(sum of negative-amount transactions in the Income-category).
     """
-    # Compute previous month/year
-    if month == 1:
-        prev_month, prev_year = 12, year - 1
-    else:
-        prev_month, prev_year = month - 1, year
-
-    start_date = date(prev_year, prev_month, 1)
-    if prev_month == 12:
-        end_date = date(prev_year + 1, 1, 1)
-    else:
-        end_date = date(prev_year, prev_month + 1, 1)
+    prev_m, prev_y = budget_math.prev_month(month, year)
+    start_date, end_date = budget_math.month_range(prev_m, prev_y)
 
     # Find the Income category (budget_excluded=True, name matching "Income")
     cat_result = await db.execute(
@@ -80,9 +55,8 @@ async def get_last_month_income(db: AsyncSession, month: int, year: int) -> Deci
     )
     income_cat = cat_result.scalar_one_or_none()
     if income_cat is None:
-        return Decimal("0")
+        return ZERO
 
-    # Income transactions are typically credits (negative amounts in our schema)
     result = await db.execute(
         select(func.sum(Transaction.amount)).where(
             and_(
@@ -94,82 +68,33 @@ async def get_last_month_income(db: AsyncSession, month: int, year: int) -> Deci
     )
     total = result.scalar_one_or_none()
     if total is None:
-        return Decimal("0")
+        return ZERO
     # Negate because income credits are stored as negative amounts
     return abs(Decimal(str(total)))
 
 
 # ---------------------------------------------------------------------------
-# Fill from last month
+# Dashboard payload (FR-6.1–6.3)
 # ---------------------------------------------------------------------------
 
-async def fill_from_last_month(db: AsyncSession, month: int, year: int) -> int:
-    """
-    Copy Budget rows from the previous month into (month, year).
-    Existing rows for (month, year) are overwritten.
-    Returns the count of rows copied.
-    """
-    if month == 1:
-        prev_month, prev_year = 12, year - 1
-    else:
-        prev_month, prev_year = month - 1, year
-
-    # Load previous month's budgets
-    prev_result = await db.execute(
-        select(Budget).where(Budget.month == prev_month, Budget.year == prev_year)
-    )
-    prev_budgets = prev_result.scalars().all()
-
-    if not prev_budgets:
-        return 0
-
-    # Load current month's existing budgets for upsert
-    cur_result = await db.execute(
-        select(Budget).where(Budget.month == month, Budget.year == year)
-    )
-    # Index by (category_id, subcategory_id)
-    cur_map: dict[tuple, Budget] = {}
-    for b in cur_result.scalars().all():
-        cur_map[(b.category_id, b.subcategory_id)] = b
-
-    count = 0
-    for prev in prev_budgets:
-        key = (prev.category_id, prev.subcategory_id)
-        if key in cur_map:
-            cur_map[key].amount = prev.amount
-        else:
-            db.add(Budget(
-                id=uuid.uuid4(),
-                category_id=prev.category_id,
-                subcategory_id=prev.subcategory_id,
-                month=month,
-                year=year,
-                amount=prev.amount,
-            ))
-        count += 1
-
-    await db.flush()
-    return count
+def _row_status(
+    cap: Decimal, spent: Decimal, covered: Decimal, net: Decimal
+) -> str:
+    """Progress-bar state per FR-6.2."""
+    if net > 0:
+        return "over"
+    if spent > cap:
+        return "covered"
+    if cap > 0 and spent >= cap * Decimal("0.8"):
+        return "approaching"
+    return "on_track"
 
 
-# ---------------------------------------------------------------------------
-# Main budget listing
-# ---------------------------------------------------------------------------
-
-async def get_budgets_for_month(
+async def get_budget_dashboard(
     db: AsyncSession, month: int, year: int
-) -> BudgetListResponse:
-    """
-    Return budgets for all non-excluded active categories for the given month/year,
-    plus pool summary fields (pool_pct, pool_amount, allocated, leftover).
+) -> BudgetDashboardResponse:
+    await budget_lifecycle.ensure_month(db, month, year)
 
-    - Categories with budget_excluded=True (Income, Investments) are skipped.
-    - Categories with active subcategories: one Budget row per subcategory is
-      auto-seeded at $0.  The category total is the sum.
-    - Categories without subcategories: one Budget row per category, seeded
-      from budget_defaults (or $0).  The amount is directly editable.
-    """
-    # Load non-excluded active categories with their active subcategories
     cat_result = await db.execute(
         select(Category)
         .where(
@@ -180,198 +105,308 @@ async def get_budgets_for_month(
     )
     categories = cat_result.scalars().all()
 
-    # Load all existing budgets for this month/year
     budget_result = await db.execute(
-        select(Budget).where(Budget.month == month, Budget.year == year)
+        select(Budget).where(
+            and_(
+                Budget.month == month,
+                Budget.year == year,
+                Budget.subcategory_id.isnot(None),
+            )
+        )
     )
-    budgets = budget_result.scalars().all()
-
-    # Index existing budgets
-    cat_only_budgets: dict[uuid.UUID, Budget] = {}   # category_id → row where sub IS NULL
-    sub_budgets: dict[uuid.UUID, Budget] = {}         # subcategory_id → row
-
-    for b in budgets:
-        if b.subcategory_id is None:
-            cat_only_budgets[b.category_id] = b
-        else:
-            sub_budgets[b.subcategory_id] = b
-
-    # Load category-level defaults
-    default_result = await db.execute(select(BudgetDefault))
-    defaults: dict[uuid.UUID, BudgetDefault] = {
-        bd.category_id: bd for bd in default_result.scalars().all()
+    budgets_by_sub: dict[uuid.UUID, Budget] = {
+        b.subcategory_id: b for b in budget_result.scalars().all()
     }
 
-    result_out: list[CategoryBudgetOut] = []
+    spent_map = await budget_math.get_spent_by_subcategory(db, month, year)
+
+    balance_result = await db.execute(select(SavedBalance))
+    balance_map: dict[uuid.UUID, Decimal] = {
+        sb.subcategory_id: Decimal(str(sb.balance))
+        for sb in balance_result.scalars().all()
+    }
+
+    groups: list[CategoryBudgetGroup] = []
+    unbudgeted: list[UnbudgetedSubcategory] = []
+    total_budgeted = ZERO
+    total_spent = ZERO
+    coverage_drawn = ZERO
+    net_overage_count = 0
 
     for cat in categories:
         active_subs = [s for s in cat.subcategories if s.is_active]
+        rows: list[SubcategoryBudgetRow] = []
 
-        if active_subs:
-            # ── Category with subcategories ─────────────────────────────────
-            sub_outs: list[SubcategoryBudgetOut] = []
-
-            for sub in active_subs:
-                if sub.id not in sub_budgets:
-                    new_b = Budget(
-                        id=uuid.uuid4(),
+        for sub in active_subs:
+            b = budgets_by_sub.get(sub.id)
+            if b is None:
+                unbudgeted.append(
+                    UnbudgetedSubcategory(
                         category_id=cat.id,
-                        subcategory_id=sub.id,
-                        month=month,
-                        year=year,
-                        amount=Decimal("0"),
-                    )
-                    db.add(new_b)
-                    await db.flush()
-                    sub_budgets[sub.id] = new_b
-
-                b = sub_budgets[sub.id]
-                sub_outs.append(
-                    SubcategoryBudgetOut(
-                        id=b.id,
+                        category_name=cat.name,
                         subcategory_id=sub.id,
                         subcategory_name=sub.name,
-                        category_id=cat.id,
-                        month=month,
-                        year=year,
-                        amount=Decimal(str(b.amount)),
                     )
                 )
+                continue
 
-            total = sum(s.amount for s in sub_outs)
-            result_out.append(
-                CategoryBudgetOut(
-                    category_id=cat.id,
-                    category_name=cat.name,
-                    category_color=cat.color,
-                    has_subcategories=True,
-                    total_amount=total,
-                    budget_id=None,
-                    month=month,
-                    year=year,
-                    subcategory_budgets=sub_outs,
-                )
-            )
+            cap = Decimal(str(b.amount))
+            spent = spent_map.get(sub.id, ZERO)
+            saved = balance_map.get(sub.id, ZERO)
+            overage = max(ZERO, spent - cap)
+            covered = min(overage, saved)
+            net = overage - covered
 
-        else:
-            # ── Category without subcategories ──────────────────────────────
-            if cat.id not in cat_only_budgets:
-                default_amount = Decimal("0")
-                if cat.id in defaults:
-                    default_amount = Decimal(str(defaults[cat.id].default_amount))
-
-                new_b = Budget(
-                    id=uuid.uuid4(),
-                    category_id=cat.id,
-                    subcategory_id=None,
-                    month=month,
-                    year=year,
-                    amount=default_amount,
-                )
-                db.add(new_b)
-                await db.flush()
-                cat_only_budgets[cat.id] = new_b
-
-            b = cat_only_budgets[cat.id]
-            result_out.append(
-                CategoryBudgetOut(
-                    category_id=cat.id,
-                    category_name=cat.name,
-                    category_color=cat.color,
-                    has_subcategories=False,
-                    total_amount=Decimal(str(b.amount)),
+            rows.append(
+                SubcategoryBudgetRow(
                     budget_id=b.id,
-                    month=month,
-                    year=year,
-                    subcategory_budgets=[],
+                    subcategory_id=sub.id,
+                    subcategory_name=sub.name,
+                    cap=cap,
+                    spent=spent,
+                    remaining=cap - spent,
+                    saved_balance=saved,
+                    locked=b.locked,
+                    overage=overage,
+                    covered_overage=covered,
+                    net_overage=net,
+                    status=_row_status(cap, spent, covered, net),
                 )
             )
 
-    # Pool summary
-    settings = await get_budget_settings(db)
-    pool_pct = Decimal(str(settings.pool_pct))
-    last_month_income = await get_last_month_income(db, month, year)
-    pool_amount = (last_month_income * pool_pct).quantize(Decimal("0.01"))
-    allocated = sum(c.total_amount for c in result_out)
-    leftover = pool_amount - allocated
+            total_budgeted += cap
+            total_spent += spent
+            coverage_drawn += covered
+            if net > 0:
+                net_overage_count += 1
 
-    return BudgetListResponse(
-        budgets=result_out,
-        pool_pct=pool_pct,
-        pool_amount=pool_amount,
-        last_month_income=last_month_income,
-        allocated=allocated,
-        leftover=leftover,
+        if rows:
+            groups.append(
+                CategoryBudgetGroup(
+                    category_id=cat.id,
+                    category_name=cat.name,
+                    category_color=cat.color,
+                    total_cap=sum((r.cap for r in rows), ZERO),
+                    total_spent=sum((r.spent for r in rows), ZERO),
+                    total_remaining=sum((r.remaining for r in rows), ZERO),
+                    total_saved=sum((r.saved_balance for r in rows), ZERO),
+                    subcategories=rows,
+                )
+            )
+
+    return BudgetDashboardResponse(
+        month=month,
+        year=year,
+        is_closed=budget_lifecycle.is_closed_month(month, year),
+        summary=BudgetSummary(
+            total_budgeted=total_budgeted,
+            total_spent=total_spent,
+            total_remaining=total_budgeted - total_spent,
+            coverage_drawn=coverage_drawn,
+            net_overage_count=net_overage_count,
+        ),
+        categories=groups,
+        unbudgeted=unbudgeted,
     )
 
 
-async def upsert_budget(db: AsyncSession, body: BudgetUpsert) -> dict:
-    """Create or update a budget row for (category_id [+ subcategory_id], month, year)."""
-    if body.subcategory_id is not None:
-        result = await db.execute(
-            select(Budget).where(
-                Budget.subcategory_id == body.subcategory_id,
-                Budget.month == body.month,
-                Budget.year == body.year,
+# ---------------------------------------------------------------------------
+# Cap / lock / unbudget mutations (FR-1.x)
+# ---------------------------------------------------------------------------
+
+async def _get_subcategory(
+    db: AsyncSession, subcategory_id: uuid.UUID
+) -> Subcategory | None:
+    result = await db.execute(
+        select(Subcategory)
+        .where(Subcategory.id == subcategory_id)
+        .options(selectinload(Subcategory.category))
+    )
+    return result.scalar_one_or_none()
+
+
+async def _get_budget_row(
+    db: AsyncSession, subcategory_id: uuid.UUID, month: int, year: int
+) -> Budget | None:
+    result = await db.execute(
+        select(Budget).where(
+            and_(
+                Budget.subcategory_id == subcategory_id,
+                Budget.month == month,
+                Budget.year == year,
             )
         )
-    else:
-        result = await db.execute(
-            select(Budget).where(
-                Budget.category_id == body.category_id,
-                Budget.subcategory_id.is_(None),
-                Budget.month == body.month,
-                Budget.year == body.year,
-            )
-        )
+    )
+    return result.scalar_one_or_none()
 
-    budget = result.scalar_one_or_none()
 
+async def set_subcategory_cap(
+    db: AsyncSession,
+    subcategory_id: uuid.UUID,
+    month: int,
+    year: int,
+    amount: Decimal,
+) -> Budget | None:
+    """Create (= opt in, FR-1.1/1.4) or update (FR-1.6) a subcategory cap.
+    Returns None if the subcategory does not exist or is income-side (FR-1.8).
+    """
+    sub = await _get_subcategory(db, subcategory_id)
+    if sub is None or sub.category.budget_excluded:
+        return None
+
+    budget = await _get_budget_row(db, subcategory_id, month, year)
     if budget:
-        budget.amount = body.amount
+        budget.amount = amount
     else:
         budget = Budget(
             id=uuid.uuid4(),
-            category_id=body.category_id,
-            subcategory_id=body.subcategory_id,
-            month=body.month,
-            year=body.year,
-            amount=body.amount,
+            category_id=sub.category_id,
+            subcategory_id=subcategory_id,
+            month=month,
+            year=year,
+            amount=amount,
+            locked=False,
         )
         db.add(budget)
+        # Opting in creates the saved-balance pool at $0 (FR-1.5: fresh start)
+        existing_balance = await db.execute(
+            select(SavedBalance).where(
+                SavedBalance.subcategory_id == subcategory_id
+            )
+        )
+        if existing_balance.scalar_one_or_none() is None:
+            db.add(SavedBalance(subcategory_id=subcategory_id, balance=ZERO))
 
     await db.flush()
     await db.refresh(budget)
-
-    return {
-        "id": str(budget.id),
-        "category_id": str(budget.category_id),
-        "subcategory_id": str(budget.subcategory_id) if budget.subcategory_id else None,
-        "month": budget.month,
-        "year": budget.year,
-        "amount": str(budget.amount),
-    }
+    return budget
 
 
-async def update_budget_default(
-    db: AsyncSession, category_id: uuid.UUID, body: BudgetDefaultUpdate
-) -> BudgetDefault:
-    """Upsert a BudgetDefault for the given category."""
-    result = await db.execute(
-        select(BudgetDefault).where(BudgetDefault.category_id == category_id)
+async def set_subcategory_lock(
+    db: AsyncSession,
+    subcategory_id: uuid.UUID,
+    month: int,
+    year: int,
+    locked: bool,
+) -> Budget | None:
+    budget = await _get_budget_row(db, subcategory_id, month, year)
+    if budget is None:
+        return None
+    budget.locked = locked
+    await db.flush()
+    return budget
+
+
+async def remove_subcategory_budget(
+    db: AsyncSession, subcategory_id: uuid.UUID, month: int, year: int
+) -> bool:
+    """Unbudget (FR-1.5): delete the month's cap row and the saved balance,
+    logging an unbudgeted_deleted event. Historical months keep their data."""
+    budget = await _get_budget_row(db, subcategory_id, month, year)
+    if budget is None:
+        return False
+    await db.delete(budget)
+
+    balance_result = await db.execute(
+        select(SavedBalance).where(SavedBalance.subcategory_id == subcategory_id)
     )
-    bd = result.scalar_one_or_none()
-
-    if bd:
-        bd.default_amount = body.default_amount
-    else:
-        bd = BudgetDefault(
-            id=uuid.uuid4(),
-            category_id=category_id,
-            default_amount=body.default_amount,
+    balance_row = balance_result.scalar_one_or_none()
+    if balance_row is not None:
+        balance = Decimal(str(balance_row.balance))
+        db.add(
+            SavedBalanceEvent(
+                id=uuid.uuid4(),
+                subcategory_id=subcategory_id,
+                delta=-balance,
+                balance_after=ZERO,
+                reason=SavedBalanceEvent.REASON_UNBUDGETED,
+            )
         )
-        db.add(bd)
+        await db.delete(balance_row)
 
     await db.flush()
-    await db.refresh(bd)
-    return bd
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Saved balances (FR-3.4, FR-3.5)
+# ---------------------------------------------------------------------------
+
+async def list_saved_balances(db: AsyncSession) -> list[SavedBalanceOut]:
+    result = await db.execute(
+        select(SavedBalance).options(selectinload(SavedBalance.subcategory))
+    )
+    return [
+        SavedBalanceOut(
+            subcategory_id=sb.subcategory_id,
+            subcategory_name=sb.subcategory.name if sb.subcategory else "",
+            balance=Decimal(str(sb.balance)),
+        )
+        for sb in result.scalars().all()
+    ]
+
+
+async def reset_saved_balance(
+    db: AsyncSession, subcategory_id: uuid.UUID, value: Decimal
+) -> SavedBalance | None:
+    """Manually set a saved balance to any value >= 0 (FR-3.4), audited."""
+    result = await db.execute(
+        select(SavedBalance)
+        .where(SavedBalance.subcategory_id == subcategory_id)
+        .options(selectinload(SavedBalance.subcategory))
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    old = Decimal(str(row.balance))
+    if value != old:
+        row.balance = value
+        db.add(
+            SavedBalanceEvent(
+                id=uuid.uuid4(),
+                subcategory_id=subcategory_id,
+                delta=value - old,
+                balance_after=value,
+                reason=SavedBalanceEvent.REASON_MANUAL_RESET,
+            )
+        )
+        await db.flush()
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Exclusion rules (FR-4.3) — applied at import in the exclusions chunk
+# ---------------------------------------------------------------------------
+
+async def list_exclusion_rules(db: AsyncSession) -> list[BudgetExclusionRule]:
+    result = await db.execute(
+        select(BudgetExclusionRule).order_by(BudgetExclusionRule.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def create_exclusion_rule(
+    db: AsyncSession, body: ExclusionRuleCreate
+) -> BudgetExclusionRule:
+    rule = BudgetExclusionRule(
+        id=uuid.uuid4(),
+        rule_type=body.rule_type,
+        match_value=body.match_value,
+        active=body.active,
+    )
+    db.add(rule)
+    await db.flush()
+    await db.refresh(rule)
+    return rule
+
+
+async def delete_exclusion_rule(db: AsyncSession, rule_id: uuid.UUID) -> bool:
+    result = await db.execute(
+        select(BudgetExclusionRule).where(BudgetExclusionRule.id == rule_id)
+    )
+    rule = result.scalar_one_or_none()
+    if rule is None:
+        return False
+    await db.delete(rule)
+    await db.flush()
+    return True

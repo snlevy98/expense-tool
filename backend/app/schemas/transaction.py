@@ -22,6 +22,8 @@ class TransactionOut(BaseModel):
     import_source: str
     import_batch_id: uuid.UUID | None
     external_reference: str | None = None
+    budget_excluded: bool = False
+    budget_excluded_source: str | None = None
     created_at: datetime
     updated_at: datetime
 

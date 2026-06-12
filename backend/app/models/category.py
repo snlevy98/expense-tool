@@ -27,6 +27,3 @@ class Category(Base, TimestampMixin):
     budgets: Mapped[list["Budget"]] = relationship(  # noqa: F821
         "Budget", back_populates="category"
     )
-    budget_default: Mapped["BudgetDefault | None"] = relationship(  # noqa: F821
-        "BudgetDefault", back_populates="category", uselist=False
-    )

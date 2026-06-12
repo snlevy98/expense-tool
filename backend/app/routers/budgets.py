@@ -12,83 +12,123 @@ from app.middleware.auth import require_auth
 from app.models.category import Category
 from app.models.transaction import Transaction
 from app.schemas.budget import (
-    BudgetDefaultUpdate,
-    BudgetListResponse,
-    BudgetSettingsOut,
-    BudgetSettingsUpdate,
+    BudgetDashboardResponse,
     BudgetSuggestRequest,
     BudgetSuggestResponse,
     BudgetSuggestionItem,
-    BudgetUpsert,
-    CategoryBudgetOut,
+    CapUpdate,
+    ExclusionRuleCreate,
+    ExclusionRuleOut,
+    LockUpdate,
+    SavedBalanceOut,
+    SavedBalanceReset,
 )
-from app.services import ai_service
+from app.services import ai_service, budget_lifecycle
 from app.services.budget_service import (
-    fill_from_last_month,
-    get_budget_settings,
-    get_budgets_for_month,
-    update_budget_default,
-    update_pool_pct,
-    upsert_budget,
+    create_exclusion_rule,
+    delete_exclusion_rule,
+    get_budget_dashboard,
+    list_exclusion_rules,
+    list_saved_balances,
+    remove_subcategory_budget,
+    reset_saved_balance,
+    set_subcategory_cap,
+    set_subcategory_lock,
 )
 
 router = APIRouter(prefix="/budgets", tags=["budgets"])
 
+_MONTH = Query(..., ge=1, le=12)
+_YEAR = Query(..., ge=2000, le=2100)
 
-@router.get("/settings", response_model=BudgetSettingsOut)
-async def get_settings(
+
+def _guard_closed_month(month: int, year: int) -> None:
+    """Caps and locks in closed months are read-only (FR-2.4)."""
+    if budget_lifecycle.is_closed_month(month, year):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This month is closed — caps and locks can no longer be edited.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Saved balances (FR-3.4, FR-3.5)
+# ---------------------------------------------------------------------------
+
+@router.get("/saved-balances", response_model=list[SavedBalanceOut])
+async def get_saved_balances(
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
-) -> BudgetSettingsOut:
-    settings = await get_budget_settings(db)
-    return BudgetSettingsOut(pool_pct=settings.pool_pct)
+) -> list[SavedBalanceOut]:
+    return await list_saved_balances(db)
 
 
-@router.put("/settings", response_model=BudgetSettingsOut)
-async def update_settings(
-    body: BudgetSettingsUpdate,
+@router.post("/saved-balances/{subcategory_id}/reset", response_model=SavedBalanceOut)
+async def reset_saved_balance_endpoint(
+    subcategory_id: uuid.UUID,
+    body: SavedBalanceReset,
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
-) -> BudgetSettingsOut:
-    settings = await update_pool_pct(db, body)
+) -> SavedBalanceOut:
+    row = await reset_saved_balance(db, subcategory_id, body.value)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No saved balance for this subcategory (is it budgeted?).",
+        )
     await db.commit()
-    return BudgetSettingsOut(pool_pct=settings.pool_pct)
+    return SavedBalanceOut(
+        subcategory_id=subcategory_id,
+        subcategory_name=row.subcategory.name if row.subcategory else "",
+        balance=Decimal(str(row.balance)),
+    )
 
 
-@router.post("/fill-from-last-month")
-async def fill_from_last_month_endpoint(
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(..., ge=2000, le=2100),
+# ---------------------------------------------------------------------------
+# Exclusion rules (FR-4.3)
+# ---------------------------------------------------------------------------
+
+@router.get("/exclusion-rules", response_model=list[ExclusionRuleOut])
+async def get_exclusion_rules(
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
-) -> dict:
-    count = await fill_from_last_month(db, month=month, year=year)
-    await db.commit()
-    return {"copied": count}
+) -> list[ExclusionRuleOut]:
+    rules = await list_exclusion_rules(db)
+    return [ExclusionRuleOut.model_validate(r) for r in rules]
 
 
-@router.get("/", response_model=BudgetListResponse)
-async def list_budgets(
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(..., ge=2000, le=2100),
+@router.post(
+    "/exclusion-rules",
+    response_model=ExclusionRuleOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_exclusion_rule_endpoint(
+    body: ExclusionRuleCreate,
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
-) -> BudgetListResponse:
-    result = await get_budgets_for_month(db, month=month, year=year)
+) -> ExclusionRuleOut:
+    rule = await create_exclusion_rule(db, body)
     await db.commit()
-    return result
+    return ExclusionRuleOut.model_validate(rule)
 
 
-@router.post("/")
-async def create_or_upsert_budget(
-    body: BudgetUpsert,
+@router.delete("/exclusion-rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_exclusion_rule_endpoint(
+    rule_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
-) -> dict:
-    result = await upsert_budget(db, body)
+) -> None:
+    deleted = await delete_exclusion_rule(db, rule_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Rule not found"
+        )
     await db.commit()
-    return result
 
+
+# ---------------------------------------------------------------------------
+# AI suggestion — legacy allocation-based shape, replaced in suggestions v2
+# ---------------------------------------------------------------------------
 
 @router.post("/suggest", response_model=BudgetSuggestResponse)
 async def suggest_budget_endpoint(
@@ -103,7 +143,6 @@ async def suggest_budget_endpoint(
     """
     months_back = max(1, min(12, body.months_back))
 
-    # Load non-excluded active categories with their active subcategories
     cat_result = await db.execute(
         select(Category)
         .where(Category.is_active == True, Category.budget_excluded == False)  # noqa: E712
@@ -126,6 +165,8 @@ async def suggest_budget_endpoint(
     end_date = date(today.year, today.month, 1)
 
     cat_ids = [c.id for c in categories]
+    # Netted spend (refunds reduce it, FR-4.1), excluding flagged transactions
+    # (FR-4.2 / FR-5.2)
     spending_result = await db.execute(
         select(
             Transaction.subcategory_id,
@@ -134,7 +175,7 @@ async def suggest_budget_endpoint(
         )
         .where(
             and_(
-                Transaction.amount > 0,
+                Transaction.budget_excluded == False,  # noqa: E712
                 Transaction.category_id.in_(cat_ids),
                 Transaction.transaction_date >= start_date,
                 Transaction.transaction_date < end_date,
@@ -155,7 +196,6 @@ async def suggest_budget_endpoint(
 
     mb = Decimal(str(months_back))
 
-    # Build items list for the AI prompt
     ai_items: list[dict] = []
     for cat in categories:
         active_subs = [s for s in cat.subcategories if s.is_active]
@@ -206,7 +246,6 @@ async def suggest_budget_endpoint(
     rounded: dict[str, Decimal] = {
         k: Decimal(str(round(v, 2))) for k, v in normalized.items()
     }
-    # Fix any residual rounding drift on the last item
     diff = body.allocation - sum(rounded.values())
     if diff and rounded:
         last_key = list(rounded)[-1]
@@ -232,16 +271,84 @@ async def suggest_budget_endpoint(
     )
 
 
-@router.put("/defaults/{category_id}")
-async def update_default_budget(
-    category_id: uuid.UUID,
-    body: BudgetDefaultUpdate,
+# ---------------------------------------------------------------------------
+# Dashboard + cap/lock/unbudget
+# ---------------------------------------------------------------------------
+
+@router.get("/", response_model=BudgetDashboardResponse)
+async def get_dashboard_endpoint(
+    month: int = _MONTH,
+    year: int = _YEAR,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> BudgetDashboardResponse:
+    """Envelope dashboard payload; lazily materializes the month (FR-2.2)."""
+    result = await get_budget_dashboard(db, month=month, year=year)
+    await db.commit()
+    return result
+
+
+@router.put("/subcategories/{subcategory_id}")
+async def set_cap_endpoint(
+    subcategory_id: uuid.UUID,
+    body: CapUpdate,
+    month: int = _MONTH,
+    year: int = _YEAR,
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
 ) -> dict:
-    bd = await update_budget_default(db, category_id, body)
+    _guard_closed_month(month, year)
+    await budget_lifecycle.ensure_month(db, month, year)
+    budget = await set_subcategory_cap(db, subcategory_id, month, year, body.amount)
+    if budget is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Subcategory not found or cannot be budgeted (FR-1.8).",
+        )
     await db.commit()
     return {
-        "category_id": str(bd.category_id),
-        "default_amount": str(bd.default_amount),
+        "budget_id": str(budget.id),
+        "subcategory_id": str(subcategory_id),
+        "month": month,
+        "year": year,
+        "amount": str(budget.amount),
+        "locked": budget.locked,
     }
+
+
+@router.patch("/subcategories/{subcategory_id}/lock")
+async def set_lock_endpoint(
+    subcategory_id: uuid.UUID,
+    body: LockUpdate,
+    month: int = _MONTH,
+    year: int = _YEAR,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> dict:
+    _guard_closed_month(month, year)
+    budget = await set_subcategory_lock(db, subcategory_id, month, year, body.locked)
+    if budget is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No budget for this subcategory in this month.",
+        )
+    await db.commit()
+    return {"subcategory_id": str(subcategory_id), "locked": budget.locked}
+
+
+@router.delete("/subcategories/{subcategory_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def unbudget_endpoint(
+    subcategory_id: uuid.UUID,
+    month: int = _MONTH,
+    year: int = _YEAR,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> None:
+    _guard_closed_month(month, year)
+    removed = await remove_subcategory_budget(db, subcategory_id, month, year)
+    if not removed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No budget for this subcategory in this month.",
+        )
+    await db.commit()

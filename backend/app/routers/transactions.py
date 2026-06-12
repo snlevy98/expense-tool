@@ -11,12 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.middleware.auth import require_auth
 from app.models.transaction import Transaction
+from app.schemas.budget import BudgetExclusionUpdate
 from app.schemas.transaction import EnrichPendingResponse, EnrichStatusResponse, PaginatedTransactions, TransactionOut, TransactionUpdate
 from app.services.enrichment_service import get_enrichment_progress, is_enrichment_running, run_background_enrichment
 from app.services.transaction_service import (
     delete_transaction,
     export_transactions_csv,
     get_transactions,
+    set_budget_exclusion,
     update_transaction,
 )
 
@@ -131,6 +133,22 @@ async def update_transaction_endpoint(
     auth: dict = Depends(require_auth),
 ) -> TransactionOut:
     result = await update_transaction(db, transaction_id, body)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found"
+        )
+    return result
+
+
+@router.patch("/{transaction_id}/budget-exclusion", response_model=TransactionOut)
+async def set_budget_exclusion_endpoint(
+    transaction_id: uuid.UUID,
+    body: BudgetExclusionUpdate,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> TransactionOut:
+    """Flag/unflag a transaction as budget-excluded (FR-4.2)."""
+    result = await set_budget_exclusion(db, transaction_id, body.budget_excluded)
     if not result:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found"

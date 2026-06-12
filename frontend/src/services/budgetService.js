@@ -5,33 +5,63 @@ export const getBudgets = async (month, year) => {
   return data
 }
 
-export const upsertBudget = async (budgetData) => {
-  const { data } = await api.post('/api/budgets', budgetData)
+export const setCap = async (subcategoryId, month, year, amount) => {
+  const { data } = await api.put(
+    `/api/budgets/subcategories/${subcategoryId}`,
+    { amount },
+    { params: { month, year } }
+  )
   return data
 }
 
-export const updateBudgetDefault = async (categoryId, defaultAmount) => {
-  const { data } = await api.put(`/api/budgets/defaults/${categoryId}`, {
-    default_amount: defaultAmount,
-  })
+export const setLock = async (subcategoryId, month, year, locked) => {
+  const { data } = await api.patch(
+    `/api/budgets/subcategories/${subcategoryId}/lock`,
+    { locked },
+    { params: { month, year } }
+  )
   return data
 }
 
-export const getBudgetSettings = async () => {
-  const { data } = await api.get('/api/budgets/settings')
-  return data
-}
-
-export const updateBudgetSettings = async (poolPct) => {
-  const { data } = await api.put('/api/budgets/settings', { pool_pct: poolPct })
-  return data
-}
-
-export const fillFromLastMonth = async (month, year) => {
-  const { data } = await api.post('/api/budgets/fill-from-last-month', null, {
+export const removeBudget = async (subcategoryId, month, year) => {
+  await api.delete(`/api/budgets/subcategories/${subcategoryId}`, {
     params: { month, year },
   })
+}
+
+export const getSavedBalances = async () => {
+  const { data } = await api.get('/api/budgets/saved-balances')
   return data
+}
+
+export const resetSavedBalance = async (subcategoryId, value = 0) => {
+  const { data } = await api.post(
+    `/api/budgets/saved-balances/${subcategoryId}/reset`,
+    { value }
+  )
+  return data
+}
+
+export const setTransactionExclusion = async (transactionId, budgetExcluded) => {
+  const { data } = await api.patch(
+    `/api/transactions/${transactionId}/budget-exclusion`,
+    { budget_excluded: budgetExcluded }
+  )
+  return data
+}
+
+export const getExclusionRules = async () => {
+  const { data } = await api.get('/api/budgets/exclusion-rules')
+  return data
+}
+
+export const createExclusionRule = async (rule) => {
+  const { data } = await api.post('/api/budgets/exclusion-rules', rule)
+  return data
+}
+
+export const deleteExclusionRule = async (ruleId) => {
+  await api.delete(`/api/budgets/exclusion-rules/${ruleId}`)
 }
 
 export const suggestBudget = async (allocation, monthsBack = 3) => {

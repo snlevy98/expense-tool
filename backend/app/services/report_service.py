@@ -26,7 +26,6 @@ from app.schemas.report import (
     YTDResponse,
 )
 from app.schemas.transaction import TransactionOut
-from app.services.budget_service import get_budget_settings, get_last_month_income
 
 
 def _dashboard_status(spent: Decimal, budget: Decimal) -> str:
@@ -111,14 +110,15 @@ async def get_dashboard(
     investments_raw = spend_all.get(investments_cat.id, Decimal("0")) if investments_cat else Decimal("0")
     investments = investments_raw if investments_raw > 0 else Decimal("0")
 
-    # Spent: positive-amount (expense) transactions for non-excluded categories only
+    # Spent: netted (refunds reduce it, FR-4.1) for non-excluded categories,
+    # ignoring budget-excluded transactions (FR-4.2)
     spent_result = await db.execute(
         select(Transaction.category_id, func.sum(Transaction.amount).label("total"))
         .where(
             and_(
                 Transaction.transaction_date >= start_date,
                 Transaction.transaction_date <= end_date,
-                Transaction.amount > 0,
+                Transaction.budget_excluded == False,  # noqa: E712
                 Transaction.category_id.in_([c.id for c in budgeted_categories]),
             )
         )
@@ -128,7 +128,7 @@ async def get_dashboard(
         row.category_id: Decimal(str(row.total)) for row in spent_result.all()
     }
 
-    # Subcategory-level spending
+    # Subcategory-level spending (netted, exclusions filtered)
     subcat_spend_result = await db.execute(
         select(
             Transaction.subcategory_id,
@@ -138,7 +138,7 @@ async def get_dashboard(
             and_(
                 Transaction.transaction_date >= start_date,
                 Transaction.transaction_date <= end_date,
-                Transaction.amount > 0,
+                Transaction.budget_excluded == False,  # noqa: E712
                 Transaction.category_id.in_([c.id for c in budgeted_categories]),
                 Transaction.subcategory_id.isnot(None),
             )
@@ -152,18 +152,15 @@ async def get_dashboard(
 
     total_spent_budgeted = sum(spend_map.values(), Decimal("0"))
 
-    # Budget pool = last month's income × pool_pct
-    settings = await get_budget_settings(db)
-    last_month_income = await get_last_month_income(db, month, year)
-    pool_pct = Decimal(str(settings.pool_pct))
-    budget_pool = (last_month_income * pool_pct).quantize(Decimal("0.01"))
+    # Budget = total caps set for the month (pool model retired, doc §10)
+    total_caps = sum(budget_map.values(), Decimal("0"))
 
-    remaining = budget_pool - total_spent_budgeted
+    remaining = total_caps - total_spent_budgeted
     savings = income - investments - total_spent_budgeted
 
     summary = DashboardSummary(
         income=income,
-        budget=budget_pool,
+        budget=total_caps,
         spent=total_spent_budgeted,
         remaining=remaining,
         investments=investments,
@@ -241,7 +238,7 @@ async def get_trends(
 
     conditions = [
         Transaction.transaction_date >= start_date,
-        Transaction.amount > 0,
+        Transaction.budget_excluded == False,  # noqa: E712
     ]
     if category_id:
         conditions.append(Transaction.category_id == category_id)
@@ -293,7 +290,7 @@ async def get_top_merchants(
             and_(
                 Transaction.transaction_date >= start_date,
                 Transaction.transaction_date <= end_date,
-                Transaction.amount > 0,
+                Transaction.budget_excluded == False,  # noqa: E712
             )
         )
         .group_by(Transaction.merchant_name)
@@ -341,7 +338,7 @@ async def get_ytd(db: AsyncSession, year: int) -> YTDResponse:
             and_(
                 Transaction.transaction_date >= start_date,
                 Transaction.transaction_date <= end_date,
-                Transaction.amount > 0,
+                Transaction.budget_excluded == False,  # noqa: E712
             )
         )
         .group_by(

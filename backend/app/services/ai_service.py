@@ -234,7 +234,7 @@ Rules:
 - ALWAYS assign a category_id — NEVER return null for category_id. Every transaction can be categorized; pick the closest match even if you are uncertain
 - The only exception is a payment to yourself or a pure inter-account transfer with no merchant — those may use null
 - Use null for subcategory_id only if no subcategory fits the chosen category
-- Negative amounts are usually refunds or credits — assign a credits/income category if one exists, otherwise the category that fits the original charge type
+- Negative amounts in expense contexts are refunds — assign them to the SAME category and subcategory the original purchase would get (e.g., a clothing-store refund goes to the clothes subcategory). NEVER use an income category for a merchant refund; income categories are only for actual income such as payroll
 - Amazon, online retailers, streaming services, restaurants, cafes, and subscription charges always have a matching category — do not return null for these
 
 Respond with a JSON object in exactly this shape:

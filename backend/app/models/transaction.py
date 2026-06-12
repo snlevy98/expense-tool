@@ -42,6 +42,15 @@ class Transaction(Base, TimestampMixin):
     external_reference: Mapped[str | None] = mapped_column(
         String(200), nullable=True, index=True
     )
+    # Budget exclusion (FR-4.2): a flagged transaction is ignored by all budget
+    # math. Distinct from categories.budget_excluded, which marks a whole
+    # category (Income, Investments) as outside the budget system entirely.
+    budget_excluded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    budget_excluded_source: Mapped[str | None] = mapped_column(
+        String(10), nullable=True  # 'manual' | 'rule'
+    )
 
     account: Mapped["Account"] = relationship(  # noqa: F821
         "Account", back_populates="transactions"

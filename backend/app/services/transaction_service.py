@@ -16,6 +16,7 @@ from app.models.category import Category
 from app.models.subcategory import Subcategory
 from app.models.transaction import Transaction
 from app.schemas.transaction import TransactionOut, TransactionUpdate
+from app.services import budget_lifecycle
 
 
 def _build_filters(
@@ -95,6 +96,8 @@ def _to_transaction_out(txn: Transaction) -> TransactionOut:
         is_recurring=txn.is_recurring,
         import_source=txn.import_source,
         import_batch_id=txn.import_batch_id,
+        budget_excluded=txn.budget_excluded,
+        budget_excluded_source=txn.budget_excluded_source,
         created_at=txn.created_at,
         updated_at=txn.updated_at,
         category_name=txn.category.name if txn.category else None,
@@ -167,12 +170,48 @@ async def update_transaction(
     if not txn:
         return None
 
+    before = budget_lifecycle.budget_snapshot(txn)
+
     update_data = body.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(txn, field, value)
 
     await db.flush()
     await db.refresh(txn)
+
+    # Re-settle any settled months this edit touched (FR-4.4)
+    await budget_lifecycle.reconcile_transaction_change(
+        db, [before, budget_lifecycle.budget_snapshot(txn)]
+    )
+    return _to_transaction_out(txn)
+
+
+async def set_budget_exclusion(
+    db: AsyncSession, transaction_id: uuid.UUID, excluded: bool
+) -> TransactionOut | None:
+    """Manually flag/unflag a transaction as budget-excluded (FR-4.2).
+    The manual source always overrides rules (FR-4.3)."""
+    result = await db.execute(
+        select(Transaction)
+        .where(Transaction.id == transaction_id)
+        .options(
+            selectinload(Transaction.category),
+            selectinload(Transaction.subcategory),
+            selectinload(Transaction.account),
+        )
+    )
+    txn = result.scalar_one_or_none()
+    if not txn:
+        return None
+
+    before = budget_lifecycle.budget_snapshot(txn)
+    txn.budget_excluded = excluded
+    txn.budget_excluded_source = "manual"
+    await db.flush()
+
+    await budget_lifecycle.reconcile_transaction_change(
+        db, [before, budget_lifecycle.budget_snapshot(txn)]
+    )
     return _to_transaction_out(txn)
 
 
@@ -185,8 +224,14 @@ async def delete_transaction(
     txn = result.scalar_one_or_none()
     if not txn:
         return False
+
+    # Capture budget-relevant values before the hard delete (FR-4.4)
+    before = budget_lifecycle.budget_snapshot(txn)
+
     await db.delete(txn)
     await db.flush()
+
+    await budget_lifecycle.reconcile_transaction_change(db, [before])
     return True
 
 

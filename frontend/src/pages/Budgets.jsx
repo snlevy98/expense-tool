@@ -1,5 +1,8 @@
 import { useState } from 'react'
-import { Check, ChevronDown, ChevronRight, Copy, Loader2, Pencil, Sparkles, X } from 'lucide-react'
+import {
+  Check, ChevronDown, ChevronRight, Loader2, Lock, LockOpen,
+  Pencil, Plus, Sparkles, Trash2, X,
+} from 'lucide-react'
 import MonthSwitcher from '../components/MonthSwitcher'
 import { useBudget } from '../hooks/useBudget'
 import { useAppStore } from '../store/appStore'
@@ -8,15 +11,17 @@ import { suggestBudget } from '../services/budgetService'
 
 // ── Editable amount cell ────────────────────────────────────────────────────
 
-function AmountCell({ value, onSave }) {
+function AmountCell({ value, onSave, disabled }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(value)
   const [saving, setSaving] = useState(false)
 
   const commit = async () => {
+    const amount = parseFloat(draft)
+    if (!amount || amount <= 0) return
     setSaving(true)
     try {
-      await onSave(parseFloat(draft) || 0)
+      await onSave(amount)
       setEditing(false)
     } finally {
       setSaving(false)
@@ -39,8 +44,8 @@ function AmountCell({ value, onSave }) {
         <input
           type="number"
           step="0.01"
-          min="0"
-          className="input w-32 py-1 text-sm"
+          min="0.01"
+          className="input w-28 py-1 text-sm"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -60,78 +65,49 @@ function AmountCell({ value, onSave }) {
   return (
     <div className="flex items-center gap-2">
       <span className="tabular-nums font-medium">{formatCurrency(value)}</span>
-      <button
-        onClick={() => { setDraft(value); setEditing(true) }}
-        className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
-      >
-        <Pencil size={14} />
-      </button>
+      {!disabled && (
+        <button
+          onClick={() => { setDraft(value); setEditing(true) }}
+          className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+        >
+          <Pencil size={14} />
+        </button>
+      )}
     </div>
   )
 }
 
-// ── Editable pool % ─────────────────────────────────────────────────────────
+// ── Status badge (interim — progress bars land with the dashboard rework) ──
 
-function PoolPctCell({ value, onSave }) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(Math.round(value * 100))
-  const [saving, setSaving] = useState(false)
+const STATUS_STYLES = {
+  on_track: 'bg-emerald-50 text-emerald-700',
+  approaching: 'bg-amber-50 text-amber-700',
+  covered: 'bg-blue-50 text-blue-700',
+  over: 'bg-red-50 text-red-700',
+}
 
-  const commit = async () => {
-    const pct = Math.max(1, Math.min(100, parseInt(draft) || 80))
-    setSaving(true)
-    try {
-      await onSave(pct / 100)
-      setEditing(false)
-    } finally {
-      setSaving(false)
-    }
-  }
+const STATUS_LABELS = {
+  on_track: 'On track',
+  approaching: 'Approaching',
+  covered: 'Covered',
+  over: 'Over',
+}
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') commit()
-    if (e.key === 'Escape') { setEditing(false); setDraft(Math.round(value * 100)) }
-  }
-
-  if (editing) {
-    return (
-      <span className="inline-flex items-center gap-1">
-        <input
-          type="number"
-          min="1"
-          max="100"
-          className="input w-16 py-0.5 text-sm text-center"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onBlur={commit}
-          autoFocus
-        />
-        <span className="text-slate-500">%</span>
-      </span>
-    )
-  }
-
+function StatusBadge({ status }) {
   return (
-    <button
-      onClick={() => { setDraft(Math.round(value * 100)); setEditing(true) }}
-      className="inline-flex items-center gap-1 font-semibold text-indigo-700 hover:underline"
-      disabled={saving}
-    >
-      {Math.round(value * 100)}%
-      <Pencil size={12} className="text-indigo-400" />
-    </button>
+    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[status] || ''}`}>
+      {STATUS_LABELS[status] || status}
+    </span>
   )
 }
 
-// ── Category row with subcategories (expandable) ───────────────────────────
+// ── Category group ──────────────────────────────────────────────────────────
 
-function CategoryWithSubsRow({ catBudget, onSave }) {
+function CategoryGroup({ group, isClosed, onSaveCap, onToggleLock, onRemove }) {
   const [expanded, setExpanded] = useState(true)
 
   return (
     <>
-      {/* Category header — read-only total, click to expand/collapse */}
       <tr
         className="bg-slate-50 hover:bg-slate-100 cursor-pointer select-none"
         onClick={() => setExpanded((v) => !v)}
@@ -143,70 +119,162 @@ function CategoryWithSubsRow({ catBudget, onSave }) {
             </span>
             <span
               className="w-3 h-3 rounded-full shrink-0"
-              style={{ backgroundColor: catBudget.category_color || '#94a3b8' }}
+              style={{ backgroundColor: group.category_color || '#94a3b8' }}
             />
-            <span className="font-semibold text-slate-700">{catBudget.category_name}</span>
+            <span className="font-semibold text-slate-700">{group.category_name}</span>
           </div>
         </td>
         <td className="table-cell tabular-nums font-semibold text-slate-700">
-          {formatCurrency(catBudget.total_amount)}
+          {formatCurrency(group.total_cap)}
         </td>
-        <td className="table-cell text-xs text-slate-400 italic">
-          sum of subcategories
+        <td className="table-cell tabular-nums text-slate-600">{formatCurrency(group.total_spent)}</td>
+        <td className={`table-cell tabular-nums font-medium ${parseFloat(group.total_remaining) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+          {formatCurrency(group.total_remaining)}
         </td>
+        <td className="table-cell tabular-nums text-slate-500">{formatCurrency(group.total_saved)}</td>
+        <td className="table-cell" colSpan={2} />
       </tr>
 
-      {/* Subcategory rows */}
-      {expanded &&
-        catBudget.subcategory_budgets.map((sub) => (
-          <tr key={sub.subcategory_id} className="hover:bg-slate-50">
-            <td className="table-cell pl-10 text-slate-600">
-              {sub.subcategory_name}
-            </td>
-            <td className="table-cell">
-              <AmountCell
-                value={parseFloat(sub.amount) || 0}
-                onSave={(amount) =>
-                  onSave(sub.category_id, sub.subcategory_id, amount)
-                }
-              />
-            </td>
-            <td className="table-cell" />
-          </tr>
-        ))}
+      {expanded && group.subcategories.map((sub) => (
+        <tr key={sub.subcategory_id} className="hover:bg-slate-50">
+          <td className="table-cell pl-10 text-slate-600">{sub.subcategory_name}</td>
+          <td className="table-cell">
+            <AmountCell
+              value={parseFloat(sub.cap) || 0}
+              disabled={isClosed}
+              onSave={(amount) => onSaveCap(sub.subcategory_id, amount)}
+            />
+          </td>
+          <td className="table-cell tabular-nums text-slate-600">{formatCurrency(sub.spent)}</td>
+          <td className={`table-cell tabular-nums ${parseFloat(sub.remaining) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+            {formatCurrency(sub.remaining)}
+            {parseFloat(sub.covered_overage) > 0 && (
+              <span className="ml-1.5 text-xs text-blue-600">
+                ({formatCurrency(sub.covered_overage)} covered)
+              </span>
+            )}
+          </td>
+          <td className="table-cell tabular-nums text-slate-500">{formatCurrency(sub.saved_balance)}</td>
+          <td className="table-cell"><StatusBadge status={sub.status} /></td>
+          <td className="table-cell">
+            <div className="flex items-center gap-1">
+              <button
+                title={sub.locked ? 'Unlock (AI may adjust)' : 'Lock (AI never adjusts)'}
+                disabled={isClosed}
+                onClick={() => onToggleLock(sub.subcategory_id, !sub.locked)}
+                className={`p-1 rounded transition-colors ${sub.locked ? 'text-indigo-600 hover:bg-indigo-50' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
+              >
+                {sub.locked ? <Lock size={14} /> : <LockOpen size={14} />}
+              </button>
+              <button
+                title="Remove budget (deletes saved balance)"
+                disabled={isClosed}
+                onClick={() => onRemove(sub.subcategory_id, sub.subcategory_name, sub.saved_balance)}
+                className="p-1 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </td>
+        </tr>
+      ))}
     </>
   )
 }
 
-// ── Category row without subcategories (directly editable) ─────────────────
+// ── Unbudgeted picker ───────────────────────────────────────────────────────
 
-function CategoryDirectRow({ catBudget, onSave }) {
+function UnbudgetedSection({ unbudgeted, isClosed, onAdd }) {
+  const [addingId, setAddingId] = useState(null)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  if (!unbudgeted?.length) return null
+
+  // Group by category for display
+  const grouped = unbudgeted.reduce((acc, s) => {
+    if (!acc[s.category_id]) acc[s.category_id] = { name: s.category_name, items: [] }
+    acc[s.category_id].items.push(s)
+    return acc
+  }, {})
+
+  const commit = async (subcategoryId) => {
+    const amount = parseFloat(draft)
+    if (!amount || amount <= 0) return
+    setSaving(true)
+    try {
+      await onAdd(subcategoryId, amount)
+      setAddingId(null)
+      setDraft('')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
-    <tr className="hover:bg-slate-50">
-      <td className="table-cell">
-        <div className="flex items-center gap-2">
-          <span
-            className="w-3 h-3 rounded-full shrink-0"
-            style={{ backgroundColor: catBudget.category_color || '#94a3b8' }}
-          />
-          <span className="font-medium text-slate-800">{catBudget.category_name}</span>
-        </div>
-      </td>
-      <td className="table-cell">
-        <AmountCell
-          value={parseFloat(catBudget.total_amount) || 0}
-          onSave={(amount) => onSave(catBudget.category_id, null, amount)}
-        />
-      </td>
-      <td className="table-cell" />
-    </tr>
+    <div className="card p-0 overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-200">
+        <h2 className="font-semibold text-slate-700">Not budgeted</h2>
+        <p className="text-xs text-slate-400 mt-0.5">
+          Set a cap to start tracking a subcategory. Untracked subcategories are ignored by budgets.
+        </p>
+      </div>
+      <div className="px-6 py-4 space-y-3">
+        {Object.values(grouped).map((group) => (
+          <div key={group.name}>
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
+              {group.name}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {group.items.map((s) =>
+                addingId === s.subcategory_id ? (
+                  <span key={s.subcategory_id} className="inline-flex items-center gap-1 border border-indigo-200 bg-indigo-50 rounded-full pl-3 pr-1 py-0.5 text-sm">
+                    {s.subcategory_name}
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      placeholder="$"
+                      className="input w-20 py-0.5 text-xs ml-1"
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commit(s.subcategory_id)
+                        if (e.key === 'Escape') { setAddingId(null); setDraft('') }
+                      }}
+                      autoFocus
+                    />
+                    <button
+                      onClick={() => commit(s.subcategory_id)}
+                      disabled={saving}
+                      className="p-1 text-emerald-600 hover:bg-emerald-100 rounded-full"
+                    >
+                      <Check size={13} />
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    key={s.subcategory_id}
+                    disabled={isClosed}
+                    onClick={() => { setAddingId(s.subcategory_id); setDraft('') }}
+                    className="inline-flex items-center gap-1 border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50 rounded-full px-3 py-0.5 text-sm text-slate-600 transition-colors disabled:opacity-50"
+                  >
+                    <Plus size={12} /> {s.subcategory_name}
+                  </button>
+                )
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 
-// ── Auto-suggest modal ───────────────────────────────────────────────────────
+// ── Auto-suggest modal (legacy allocation flow — replaced in suggestions v2) ─
 
-function AutoSuggestModal({ poolAmount, onApply, onClose }) {
-  const [allocation, setAllocation] = useState(String(Math.round(poolAmount || 0)))
+function AutoSuggestModal({ defaultAllocation, onApply, onClose }) {
+  const [allocation, setAllocation] = useState(String(Math.round(defaultAllocation || 0)))
   const [monthsBack, setMonthsBack] = useState(3)
   const [suggestions, setSuggestions] = useState(null)
   const [draftAmounts, setDraftAmounts] = useState({})
@@ -221,9 +289,11 @@ function AutoSuggestModal({ poolAmount, onApply, onClose }) {
     setLoading(true)
     try {
       const data = await suggestBudget(alloc, monthsBack)
-      setSuggestions(data.suggestions)
+      // Only subcategory-level items apply under envelope budgeting (FR-1.3)
+      const items = data.suggestions.filter((s) => s.subcategory_id)
+      setSuggestions(items)
       const drafts = {}
-      for (const s of data.suggestions) drafts[s.id] = String(parseFloat(s.suggested_amount).toFixed(2))
+      for (const s of items) drafts[s.id] = String(parseFloat(s.suggested_amount).toFixed(2))
       setDraftAmounts(drafts)
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Failed to generate suggestions.')
@@ -235,17 +305,17 @@ function AutoSuggestModal({ poolAmount, onApply, onClose }) {
   const totalDraft = suggestions
     ? suggestions.reduce((sum, s) => sum + (parseFloat(draftAmounts[s.id]) || 0), 0)
     : 0
-  const diff = parseFloat(allocation || 0) - totalDraft
 
   const handleApply = async () => {
     if (!suggestions) return
     setApplying(true)
     try {
-      await onApply(suggestions.map((s) => ({
-        category_id: s.category_id,
-        subcategory_id: s.subcategory_id,
-        amount: parseFloat(draftAmounts[s.id]) || 0,
-      })))
+      await onApply(suggestions
+        .filter((s) => (parseFloat(draftAmounts[s.id]) || 0) > 0)
+        .map((s) => ({
+          subcategory_id: s.subcategory_id,
+          amount: parseFloat(draftAmounts[s.id]),
+        })))
       onClose()
     } catch (err) {
       setError(err.message || 'Failed to apply budgets.')
@@ -254,7 +324,6 @@ function AutoSuggestModal({ poolAmount, onApply, onClose }) {
     }
   }
 
-  // Group suggestions by category for display
   const grouped = suggestions
     ? suggestions.reduce((acc, s) => {
         const key = s.category_id
@@ -267,7 +336,6 @@ function AutoSuggestModal({ poolAmount, onApply, onClose }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
-        {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
           <div className="flex items-center gap-2">
             <Sparkles size={18} className="text-indigo-500" />
@@ -278,7 +346,6 @@ function AutoSuggestModal({ poolAmount, onApply, onClose }) {
           </button>
         </div>
 
-        {/* Config */}
         <div className="px-6 py-4 border-b border-slate-100 flex flex-wrap items-end gap-4">
           <div>
             <label className="label text-xs">Monthly allocation ($)</label>
@@ -318,7 +385,6 @@ function AutoSuggestModal({ poolAmount, onApply, onClose }) {
           </div>
         )}
 
-        {/* Suggestions table */}
         {grouped && (
           <div className="flex-1 overflow-y-auto px-6 py-4">
             <table className="w-full text-sm">
@@ -339,9 +405,7 @@ function AutoSuggestModal({ poolAmount, onApply, onClose }) {
                     </tr>
                     {group.items.map((s) => (
                       <tr key={s.id} className="hover:bg-slate-50">
-                        <td className="py-2 pl-3 text-slate-700">
-                          {s.subcategory_name || s.category_name}
-                        </td>
+                        <td className="py-2 pl-3 text-slate-700">{s.subcategory_name}</td>
                         <td className="py-2 pr-4 text-right text-slate-400 tabular-nums">
                           {formatCurrency(parseFloat(s.monthly_avg))}
                         </td>
@@ -364,17 +428,11 @@ function AutoSuggestModal({ poolAmount, onApply, onClose }) {
           </div>
         )}
 
-        {/* Footer */}
         {grouped && (
           <div className="px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-4">
             <div className="text-sm">
               <span className="text-slate-600">Total: </span>
               <span className="font-semibold text-slate-800 tabular-nums">{formatCurrency(totalDraft)}</span>
-              {Math.abs(diff) >= 0.01 && (
-                <span className={`ml-3 text-xs font-medium ${diff > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
-                  {diff > 0 ? `${formatCurrency(diff)} under` : `${formatCurrency(Math.abs(diff))} over`} allocation
-                </span>
-              )}
             </div>
             <div className="flex gap-2">
               <button onClick={onClose} className="btn-secondary text-sm">Cancel</button>
@@ -393,45 +451,48 @@ function AutoSuggestModal({ poolAmount, onApply, onClose }) {
   )
 }
 
-
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export default function Budgets() {
   const setMonth = useAppStore((s) => s.setMonth)
   const {
-    budgets,
-    poolInfo,
+    data,
     loading,
     error,
-    saveBudget,
-    savePoolPct,
-    fillFromLastMonth,
+    saveCap,
+    toggleLock,
+    removeBudget,
     selectedMonth,
     selectedYear,
   } = useBudget()
 
-  const [filling, setFilling] = useState(false)
-  const [fillResult, setFillResult] = useState(null)
   const [suggestOpen, setSuggestOpen] = useState(false)
+  const [actionError, setActionError] = useState(null)
 
-  const handleFill = async () => {
-    setFilling(true)
-    setFillResult(null)
+  const summary = data?.summary
+  const isClosed = data?.is_closed ?? false
+
+  const wrap = (fn) => async (...args) => {
+    setActionError(null)
     try {
-      const result = await fillFromLastMonth()
-      setFillResult(result.copied)
-    } catch {
-      setFillResult(-1)
-    } finally {
-      setFilling(false)
+      await fn(...args)
+    } catch (err) {
+      setActionError(err.response?.data?.detail || err.message || 'Action failed')
     }
   }
 
-  const isOverBudget = poolInfo.leftover < 0
+  const handleRemove = wrap(async (subcategoryId, name, saved) => {
+    const savedNum = parseFloat(saved) || 0
+    const msg = savedNum > 0
+      ? `Remove the budget for "${name}"? Its saved balance of ${formatCurrency(savedNum)} will be deleted (history is kept).`
+      : `Remove the budget for "${name}"?`
+    if (!window.confirm(msg)) return
+    await removeBudget(subcategoryId)
+  })
 
   const handleApplySuggestions = async (items) => {
     for (const item of items) {
-      await saveBudget(item.category_id, item.subcategory_id, item.amount)
+      await saveCap(item.subcategory_id, item.amount)
     }
   }
 
@@ -440,135 +501,126 @@ export default function Budgets() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Budgets</h1>
-          <p className="text-slate-500 text-sm mt-0.5">Manage monthly category budgets</p>
+          <p className="text-slate-500 text-sm mt-0.5">
+            Envelope caps per subcategory — surpluses roll into saved balances
+          </p>
         </div>
         <MonthSwitcher month={selectedMonth} year={selectedYear} onChange={setMonth} />
       </div>
 
-      {error && (
+      {(error || actionError) && (
         <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-          {error}
+          {error || actionError}
         </div>
       )}
 
-      {/* Pool Summary Panel */}
-      <div className="card space-y-3">
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-          <span className="text-slate-600">
-            Budget pool:{' '}
-            <PoolPctCell value={poolInfo.pool_pct} onSave={savePoolPct} />
-            {' '}of last month's income{' '}
-            <span className="text-slate-500">({formatCurrency(poolInfo.last_month_income)})</span>
-            {' '}={' '}
-            <span className="font-semibold text-slate-800">{formatCurrency(poolInfo.pool_amount)}</span>
-          </span>
+      {isClosed && (
+        <div className="p-3 bg-slate-100 border border-slate-200 rounded-lg text-slate-600 text-sm">
+          This month is closed — caps and locks are read-only. Late transactions still update its actuals.
         </div>
+      )}
 
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+      {/* Summary */}
+      {summary && (
+        <div className="card flex flex-wrap items-center gap-x-8 gap-y-2 text-sm">
           <span className="text-slate-600">
-            Allocated:{' '}
-            <span className="font-semibold text-slate-800">{formatCurrency(poolInfo.allocated)}</span>
+            Budgeted: <span className="font-semibold text-slate-800 tabular-nums">{formatCurrency(summary.total_budgeted)}</span>
           </span>
-          <span className={isOverBudget ? 'text-red-600 font-semibold' : 'text-slate-600'}>
-            Leftover:{' '}
-            <span className={`font-semibold ${isOverBudget ? 'text-red-600' : 'text-emerald-700'}`}>
-              {formatCurrency(poolInfo.leftover)}
+          <span className="text-slate-600">
+            Spent: <span className="font-semibold text-slate-800 tabular-nums">{formatCurrency(summary.total_spent)}</span>
+          </span>
+          <span className="text-slate-600">
+            Remaining:{' '}
+            <span className={`font-semibold tabular-nums ${parseFloat(summary.total_remaining) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>
+              {formatCurrency(summary.total_remaining)}
             </span>
-            {isOverBudget && (
-              <span className="ml-1 text-xs text-red-500">(over budget!)</span>
-            )}
           </span>
-
-          <div className="flex gap-2 ml-auto">
+          {parseFloat(summary.coverage_drawn) > 0 && (
+            <span className="text-blue-600">
+              Covered by savings: <span className="font-semibold tabular-nums">{formatCurrency(summary.coverage_drawn)}</span>
+            </span>
+          )}
+          {summary.net_overage_count > 0 && (
+            <span className="text-red-600 font-medium">
+              {summary.net_overage_count} over budget
+            </span>
+          )}
+          <div className="ml-auto">
             <button
               onClick={() => setSuggestOpen(true)}
               className="btn-secondary flex items-center gap-1.5"
+              disabled={isClosed}
             >
               <Sparkles size={14} className="text-indigo-500" /> Auto-suggest
             </button>
-            <button
-              onClick={handleFill}
-              disabled={filling}
-              className="btn-secondary"
-            >
-              {filling
-                ? <><Loader2 size={14} className="animate-spin" /> Filling…</>
-                : <><Copy size={14} /> Fill from Last Month</>}
-            </button>
           </div>
         </div>
+      )}
 
-        {fillResult !== null && (
-          <p className="text-xs text-slate-500">
-            {fillResult === -1
-              ? 'Failed to copy budgets from last month.'
-              : fillResult === 0
-              ? 'No budgets found in the previous month to copy.'
-              : `Copied ${fillResult} budget${fillResult !== 1 ? 's' : ''} from last month.`}
-          </p>
-        )}
-      </div>
-
+      {/* Budgeted table */}
       <div className="card p-0 overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-          <h2 className="font-semibold text-slate-700">Category Budgets</h2>
-          <span className="text-sm text-slate-500">
-            Total:{' '}
-            <span className="font-semibold text-slate-800">
-              {formatCurrency(poolInfo.allocated)}
-            </span>
-          </span>
+        <div className="px-6 py-4 border-b border-slate-200">
+          <h2 className="font-semibold text-slate-700">Budgeted subcategories</h2>
         </div>
-
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-slate-200">
-              <th className="table-header">Category / Subcategory</th>
-              <th className="table-header">This Month</th>
-              <th className="table-header w-40" />
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {loading ? (
-              [...Array(6)].map((_, i) => (
-                <tr key={i}>
-                  {[...Array(3)].map((__, j) => (
-                    <td key={j} className="px-4 py-3">
-                      <div className="h-4 skeleton rounded w-24" />
-                    </td>
-                  ))}
-                </tr>
-              ))
-            ) : budgets.length === 0 ? (
-              <tr>
-                <td colSpan={3} className="px-4 py-8 text-center text-slate-400">
-                  No categories found. Add categories in Settings.
-                </td>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-200">
+                <th className="table-header">Category / Subcategory</th>
+                <th className="table-header">Cap</th>
+                <th className="table-header">Spent</th>
+                <th className="table-header">Remaining</th>
+                <th className="table-header">Saved</th>
+                <th className="table-header">Status</th>
+                <th className="table-header w-20" />
               </tr>
-            ) : (
-              budgets.map((catBudget) =>
-                catBudget.has_subcategories ? (
-                  <CategoryWithSubsRow
-                    key={catBudget.category_id}
-                    catBudget={catBudget}
-                    onSave={saveBudget}
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {loading ? (
+                [...Array(6)].map((_, i) => (
+                  <tr key={i}>
+                    {[...Array(7)].map((__, j) => (
+                      <td key={j} className="px-4 py-3">
+                        <div className="h-4 skeleton rounded w-16" />
+                      </td>
+                    ))}
+                  </tr>
+                ))
+              ) : !data?.categories?.length ? (
+                <tr>
+                  <td colSpan={7} className="px-4 py-8 text-center text-slate-400">
+                    No budgeted subcategories yet — pick some below to start.
+                  </td>
+                </tr>
+              ) : (
+                data.categories.map((group) => (
+                  <CategoryGroup
+                    key={group.category_id}
+                    group={group}
+                    isClosed={isClosed}
+                    onSaveCap={wrap(saveCap)}
+                    onToggleLock={wrap(toggleLock)}
+                    onRemove={handleRemove}
                   />
-                ) : (
-                  <CategoryDirectRow
-                    key={catBudget.category_id}
-                    catBudget={catBudget}
-                    onSave={saveBudget}
-                  />
-                )
-              )
-            )}
-          </tbody>
-        </table>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
+
+      {/* Unbudgeted picker */}
+      {!loading && (
+        <UnbudgetedSection
+          unbudgeted={data?.unbudgeted}
+          isClosed={isClosed}
+          onAdd={wrap(saveCap)}
+        />
+      )}
 
       {suggestOpen && (
         <AutoSuggestModal
-          poolAmount={poolInfo.pool_amount}
+          defaultAllocation={parseFloat(summary?.total_budgeted) || 0}
           onApply={handleApplySuggestions}
           onClose={() => setSuggestOpen(false)}
         />

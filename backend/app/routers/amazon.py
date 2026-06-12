@@ -27,7 +27,7 @@ from app.db.session import get_db
 from app.middleware.auth import require_auth
 from app.models.category import Category
 from app.models.transaction import Transaction
-from app.services import ai_service
+from app.services import ai_service, budget_lifecycle
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/amazon", tags=["amazon"])
@@ -405,6 +405,7 @@ async def apply_groceries(
         return {"updated": 0}
 
     updated = 0
+    snapshots: list[dict] = []
     for match in body.matches:
         result = await db.execute(
             select(Transaction).where(Transaction.id == match.transaction_id)
@@ -412,12 +413,16 @@ async def apply_groceries(
         txn = result.scalar_one_or_none()
         if not txn:
             continue
+        snapshots.append(budget_lifecycle.budget_snapshot(txn))
         txn.merchant_name = WHOLE_FOODS_NAME
         txn.category_id = match.category_id
         txn.subcategory_id = match.subcategory_id
+        snapshots.append(budget_lifecycle.budget_snapshot(txn))
         updated += 1
 
     await db.flush()
+    # Categorizing can affect settled months (FR-4.4)
+    await budget_lifecycle.reconcile_transaction_change(db, snapshots)
     return {"updated": updated}
 
 
@@ -437,6 +442,7 @@ async def itemize_orders(
 
     created = 0
     modified = 0
+    snapshots: list[dict] = []
 
     for order in body.orders:
         result = await db.execute(
@@ -446,6 +452,8 @@ async def itemize_orders(
         if not parent:
             logger.warning("Parent transaction %s not found — skipping", order.parent_transaction_id)
             continue
+
+        snapshots.append(budget_lifecycle.budget_snapshot(parent))
 
         # Create one child transaction per item
         for item in order.items:
@@ -465,6 +473,7 @@ async def itemize_orders(
                 import_batch_id=parent.import_batch_id,
             )
             db.add(child)
+            snapshots.append(budget_lifecycle.budget_snapshot(child))
             created += 1
 
         # Repurpose parent as taxes/fees row instead of deleting it
@@ -487,7 +496,10 @@ async def itemize_orders(
         parent.subcategory_id = None
         parent.ai_suggested_category_id = most_common_cat
         parent.ai_suggested_subcategory_id = None
+        snapshots.append(budget_lifecycle.budget_snapshot(parent))
         modified += 1
 
     await db.flush()
+    # Itemization re-dates/re-categorizes spend; settled months recompute (FR-4.4)
+    await budget_lifecycle.reconcile_transaction_change(db, snapshots)
     return {"created": created, "modified": modified}

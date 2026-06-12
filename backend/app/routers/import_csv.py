@@ -33,7 +33,7 @@ from app.schemas.transaction import (
     ImportPreviewResponse,
     VenmoUnmatchedItem,
 )
-from app.services import ai_service
+from app.services import ai_service, budget_lifecycle
 from app.services.csv_service import parse_file
 from app.services.enrichment_service import run_background_enrichment
 
@@ -441,6 +441,13 @@ async def confirm_import(
             saved_transactions.append(txn)
 
     await db.flush()
+
+    # Late-arriving transactions dated in already-settled months re-settle
+    # those months (FR-2.4 / FR-4.4). Venmo match-updates don't change
+    # date/amount/subcategory, so only categorized inserts can have an effect.
+    await budget_lifecycle.reconcile_transaction_change(
+        db, [budget_lifecycle.budget_snapshot(t) for t in saved_transactions]
+    )
 
     asyncio.create_task(_run_recurring_detection(saved_transactions, db))
 

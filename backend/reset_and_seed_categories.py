@@ -17,7 +17,6 @@ from sqlalchemy import delete, update
 
 from app.db.session import AsyncSessionLocal
 from app.models.budget import Budget
-from app.models.budget_default import BudgetDefault
 from app.models.category import Category
 from app.models.subcategory import Subcategory
 from app.models.transaction import Transaction
@@ -34,9 +33,7 @@ async def reset_and_seed() -> None:
         )
         print(f"  Updated {result.rowcount} transaction rows.")
 
-        print("Step 2: Deleting all budgets and budget defaults…")
-        bd_result = await db.execute(delete(BudgetDefault))
-        print(f"  Deleted {bd_result.rowcount} budget defaults.")
+        print("Step 2: Deleting all budgets…")
         b_result = await db.execute(delete(Budget))
         print(f"  Deleted {b_result.rowcount} budgets.")
 
