@@ -12,7 +12,7 @@ export default function Transactions() {
     transactions, loading, error, filters, sortBy, sortDir,
     page, total, totalPages, pageSize,
     updateFilter, resetFilters, handleSort,
-    editTransaction, removeTransaction, refetch, setPage,
+    editTransaction, removeTransaction, toggleExclusion, refetch, setPage,
     currentFilters,
   } = useTransactions()
 
@@ -199,6 +199,7 @@ export default function Transactions() {
           transactions={transactions}
           onEdit={setEditingTx}
           onDelete={removeTransaction}
+          onToggleExclusion={toggleExclusion}
           loading={loading}
           sortBy={sortBy}
           sortDir={sortDir}

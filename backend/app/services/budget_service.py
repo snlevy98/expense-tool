@@ -410,3 +410,80 @@ async def delete_exclusion_rule(db: AsyncSession, rule_id: uuid.UUID) -> bool:
     await db.delete(rule)
     await db.flush()
     return True
+
+
+# ---------------------------------------------------------------------------
+# Exclusion rules engine (FR-4.3) — applied at import confirm and re-applied
+# after background enrichment normalizes merchant names.
+# ---------------------------------------------------------------------------
+
+def _rule_matches(rule: BudgetExclusionRule, txn: Transaction) -> bool:
+    if rule.rule_type == "category":
+        return txn.category_id is not None and str(txn.category_id) == rule.match_value
+    if rule.rule_type == "subcategory":
+        return (
+            txn.subcategory_id is not None
+            and str(txn.subcategory_id) == rule.match_value
+        )
+    if rule.rule_type == "merchant_match":
+        needle = rule.match_value.lower()
+        # raw_description is checked too so a rule still matches after enrichment
+        # renames merchant_name (and never un-matches a name it caught pre-rename).
+        return (
+            needle in (txn.merchant_name or "").lower()
+            or needle in (txn.raw_description or "").lower()
+        )
+    return False
+
+
+async def apply_exclusion_rules(
+    db: AsyncSession,
+    transactions: list[Transaction],
+    rules: list[BudgetExclusionRule] | None = None,
+) -> int:
+    """Apply active exclusion rules to ``transactions`` (FR-4.3).
+
+    For each non-manual transaction, recompute whether any active rule matches:
+    a match sets ``budget_excluded=True`` / ``source='rule'``; if nothing matches
+    and the flag was previously rule-set, it is cleared. Manual flags
+    (``source='manual'``) are never touched — the manual choice always wins.
+    Settled months affected by a change are re-settled. Returns the count of
+    transactions whose flag changed. The caller commits.
+    """
+    if not transactions:
+        return 0
+    if rules is None:
+        result = await db.execute(
+            select(BudgetExclusionRule).where(BudgetExclusionRule.active == True)  # noqa: E712
+        )
+        rules = list(result.scalars().all())
+    if not rules:
+        return 0
+
+    snapshots: list[dict] = []
+    changed = 0
+    for txn in transactions:
+        if txn.budget_excluded_source == "manual":
+            continue
+        matched = any(_rule_matches(r, txn) for r in rules)
+        if matched and not txn.budget_excluded:
+            before = budget_lifecycle.budget_snapshot(txn)
+            txn.budget_excluded = True
+            txn.budget_excluded_source = "rule"
+            snapshots += [before, budget_lifecycle.budget_snapshot(txn)]
+            changed += 1
+        elif (
+            not matched
+            and txn.budget_excluded
+            and txn.budget_excluded_source == "rule"
+        ):
+            before = budget_lifecycle.budget_snapshot(txn)
+            txn.budget_excluded = False
+            txn.budget_excluded_source = None
+            snapshots += [before, budget_lifecycle.budget_snapshot(txn)]
+            changed += 1
+
+    if changed:
+        await db.flush()
+        await budget_lifecycle.reconcile_transaction_change(db, snapshots)
+    return changed

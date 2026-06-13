@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { getTransactions, updateTransaction, deleteTransaction } from '../services/transactionService'
+import { setTransactionExclusion } from '../services/budgetService'
 
 const DEFAULT_FILTERS = {
   account_id: '',
@@ -105,6 +106,12 @@ export const useTransactions = () => {
     setTotal((prev) => prev - 1)
   }
 
+  const toggleExclusion = async (tx) => {
+    const updated = await setTransactionExclusion(tx.id, !tx.budget_excluded)
+    setTransactions((prev) => prev.map((t) => (t.id === tx.id ? { ...t, ...updated } : t)))
+    return updated
+  }
+
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
   return {
@@ -123,6 +130,7 @@ export const useTransactions = () => {
     handleSort,
     editTransaction,
     removeTransaction,
+    toggleExclusion,
     refetch: fetchTransactions,
     setPage,
     currentFilters: buildParams(),

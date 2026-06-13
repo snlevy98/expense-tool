@@ -16,7 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.db.session import AsyncSessionLocal
 from app.models.category import Category
 from app.models.transaction import Transaction
-from app.services import ai_service
+from app.services import ai_service, budget_service
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +161,11 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                                 except (ValueError, AttributeError):
                                     pass
                                 txn.ai_enriched = True
+
+                            # Re-apply exclusion rules now that merchant names are
+                            # normalized, so merchant-match rules catch the
+                            # late-normalized names (FR-4.3).
+                            await budget_service.apply_exclusion_rules(db, chunk)
 
                             # Commit this chunk — fully enriched rows are now persisted
                             await db.commit()

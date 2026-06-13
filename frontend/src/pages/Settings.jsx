@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertCircle, Brain, Check, ChevronDown, ChevronRight, GripVertical, Loader2, Lock, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { AlertCircle, Ban, Brain, Check, ChevronDown, ChevronRight, GripVertical, Loader2, Lock, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useAppStore } from '../store/appStore'
 import { useCategories } from '../hooks/useCategories'
 import {
@@ -11,6 +11,9 @@ import {
   reorderSubcategories,
 } from '../services/categoryService'
 import { getTrainingDataStats, trainCategorizer } from '../services/mlService'
+import {
+  getExclusionRules, createExclusionRule, deleteExclusionRule,
+} from '../services/budgetService'
 
 const ACCOUNT_TYPES = ['checking', 'savings', 'credit_card', 'investment', 'cash', 'venmo', 'other']
 
@@ -621,6 +624,177 @@ function MachineLearningPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// Budget exclusion rules panel
+// ---------------------------------------------------------------------------
+
+const RULE_TYPES = [
+  { value: 'merchant_match', label: 'Merchant contains' },
+  { value: 'category', label: 'Category' },
+  { value: 'subcategory', label: 'Subcategory' },
+]
+
+function ExclusionRulesPanel({ categories }) {
+  const [rules, setRules] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState({
+    rule_type: 'merchant_match',
+    category_id: '',
+    subcategory_id: '',
+    match_value: '',
+  })
+
+  const load = async () => {
+    try { setError(null); setRules(await getExclusionRules()) }
+    catch (e) { setError(e.response?.data?.detail || e.message || 'Failed to load rules') }
+    finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+
+  const findCat = (id) => categories.find((c) => c.id === id)
+  const subsOf = (catId) => findCat(catId)?.subcategories ?? []
+
+  const describe = (rule) => {
+    if (rule.rule_type === 'category') {
+      return <>Category <span className="font-medium">{findCat(rule.match_value)?.name ?? rule.match_value}</span></>
+    }
+    if (rule.rule_type === 'subcategory') {
+      for (const c of categories) {
+        const s = (c.subcategories ?? []).find((x) => x.id === rule.match_value)
+        if (s) return <>Subcategory <span className="font-medium">{c.name} › {s.name}</span></>
+      }
+      return <>Subcategory <span className="font-medium">{rule.match_value}</span></>
+    }
+    return <>Merchant contains <span className="font-medium">“{rule.match_value}”</span></>
+  }
+
+  const canSubmit =
+    form.rule_type === 'category' ? !!form.category_id
+    : form.rule_type === 'subcategory' ? !!form.subcategory_id
+    : form.match_value.trim().length > 0
+
+  const handleAdd = async () => {
+    if (!canSubmit) return
+    const match_value =
+      form.rule_type === 'category' ? form.category_id
+      : form.rule_type === 'subcategory' ? form.subcategory_id
+      : form.match_value.trim()
+    setSaving(true)
+    try {
+      await createExclusionRule({ rule_type: form.rule_type, match_value, active: true })
+      setForm({ rule_type: 'merchant_match', category_id: '', subcategory_id: '', match_value: '' })
+      await load()
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message || 'Failed to add rule')
+    } finally { setSaving(false) }
+  }
+
+  const handleDelete = async (id) => {
+    try { await deleteExclusionRule(id); await load() }
+    catch (e) { setError(e.response?.data?.detail || e.message || 'Failed to delete rule') }
+  }
+
+  return (
+    <div className="card">
+      <div className="flex items-start gap-2 mb-4">
+        <Ban size={16} className="text-slate-400 mt-0.5 shrink-0" />
+        <div>
+          <h2 className="font-semibold text-slate-700 text-base">Budget Exclusion Rules</h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Auto-exclude matching transactions from budgets at import and after enrichment.
+            A transaction you exclude or include by hand always overrides these rules.
+          </p>
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {/* Existing rules */}
+      {loading ? (
+        <p className="text-sm text-slate-400 flex items-center gap-2"><Loader2 size={14} className="animate-spin" /> Loading rules…</p>
+      ) : rules.length === 0 ? (
+        <p className="text-sm text-slate-400 italic">No rules yet — add one below.</p>
+      ) : (
+        <div className="space-y-1.5 mb-4">
+          {rules.map((rule) => (
+            <div key={rule.id} className="flex items-center gap-3 px-3 py-2 border border-slate-200 rounded-lg text-sm">
+              <span className="flex-1 text-slate-700">{describe(rule)}</span>
+              {!rule.active && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-400">inactive</span>
+              )}
+              <button
+                onClick={() => handleDelete(rule.id)}
+                className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded"
+                title="Delete rule"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add rule */}
+      <div className="border border-dashed border-slate-300 rounded-lg p-4">
+        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Add Rule</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            className="input py-1.5 text-sm w-auto"
+            value={form.rule_type}
+            onChange={(e) => setForm({ rule_type: e.target.value, category_id: '', subcategory_id: '', match_value: '' })}
+          >
+            {RULE_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+          </select>
+
+          {form.rule_type === 'merchant_match' && (
+            <input
+              className="input py-1.5 text-sm flex-1 min-w-[12rem]"
+              placeholder="e.g. Venmo, Robinhood"
+              value={form.match_value}
+              onChange={(e) => setForm((p) => ({ ...p, match_value: e.target.value }))}
+              onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+            />
+          )}
+
+          {(form.rule_type === 'category' || form.rule_type === 'subcategory') && (
+            <select
+              className="input py-1.5 text-sm w-auto"
+              value={form.category_id}
+              onChange={(e) => setForm((p) => ({ ...p, category_id: e.target.value, subcategory_id: '' }))}
+            >
+              <option value="">— Category —</option>
+              {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          )}
+
+          {form.rule_type === 'subcategory' && (
+            <select
+              className="input py-1.5 text-sm w-auto"
+              value={form.subcategory_id}
+              onChange={(e) => setForm((p) => ({ ...p, subcategory_id: e.target.value }))}
+              disabled={!form.category_id || subsOf(form.category_id).length === 0}
+            >
+              <option value="">— Subcategory —</option>
+              {subsOf(form.category_id).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          )}
+
+          <button onClick={handleAdd} disabled={saving || !canSubmit} className="btn-primary py-1.5 px-3 text-sm">
+            <Plus size={14} /> Add
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -732,6 +906,9 @@ export default function Settings() {
           </div>
         </div>
       </div>
+
+      {/* Budget exclusion rules */}
+      <ExclusionRulesPanel categories={categories} />
 
       {/* Machine Learning */}
       <MachineLearningPanel />

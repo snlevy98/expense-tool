@@ -33,7 +33,7 @@ from app.schemas.transaction import (
     ImportPreviewResponse,
     VenmoUnmatchedItem,
 )
-from app.services import ai_service, budget_lifecycle
+from app.services import ai_service, budget_lifecycle, budget_service
 from app.services.csv_service import parse_file
 from app.services.enrichment_service import run_background_enrichment
 
@@ -448,6 +448,9 @@ async def confirm_import(
     await budget_lifecycle.reconcile_transaction_change(
         db, [budget_lifecycle.budget_snapshot(t) for t in saved_transactions]
     )
+
+    # Auto-exclude per the exclusion rules (FR-4.3); re-settles affected months.
+    await budget_service.apply_exclusion_rules(db, saved_transactions)
 
     asyncio.create_task(_run_recurring_detection(saved_transactions, db))
 

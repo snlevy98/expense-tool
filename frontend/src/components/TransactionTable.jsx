@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronUp, ChevronDown, Pencil, Trash2 } from 'lucide-react'
+import { ChevronUp, ChevronDown, Eye, EyeOff, Pencil, Trash2 } from 'lucide-react'
 import { formatDate } from '../utils/date'
 import { formatCurrency } from '../utils/currency'
 import { useCategories } from '../hooks/useCategories'
@@ -30,6 +30,7 @@ export default function TransactionTable({
   transactions,
   onEdit,
   onDelete,
+  onToggleExclusion,
   loading,
   sortBy,
   sortDir,
@@ -102,7 +103,7 @@ export default function TransactionTable({
               const isCredit = amount < 0
 
               return (
-                <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
+                <tr key={tx.id} className={`hover:bg-slate-50 transition-colors ${tx.budget_excluded ? 'opacity-55' : ''}`}>
                   <td className="table-cell text-slate-500 whitespace-nowrap">{formatDate(tx.transaction_date)}</td>
                   <td className="table-cell font-medium text-slate-800 max-w-[280px]">
                     <span
@@ -111,11 +112,28 @@ export default function TransactionTable({
                     >
                       {tx.raw_description || '—'}
                     </span>
-                    {tx.is_recurring && (
-                      <span className="ml-0 text-xs bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded">
-                        Recurring
-                      </span>
-                    )}
+                    <span className="flex flex-wrap items-center gap-1 mt-0.5 empty:mt-0">
+                      {tx.is_recurring && (
+                        <span className="text-xs bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded">
+                          Recurring
+                        </span>
+                      )}
+                      {isCredit && (
+                        <span className="text-xs bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">
+                          Refund
+                        </span>
+                      )}
+                      {tx.budget_excluded && (
+                        <span
+                          className="text-xs bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded"
+                          title={tx.budget_excluded_source === 'manual'
+                            ? 'Manually excluded from budgets'
+                            : 'Excluded from budgets by a rule'}
+                        >
+                          Excluded
+                        </span>
+                      )}
+                    </span>
                   </td>
                   <td className="table-cell text-slate-500 max-w-[140px]">
                     <span
@@ -149,6 +167,19 @@ export default function TransactionTable({
                   </td>
                   <td className="table-cell">
                     <div className="flex items-center gap-1">
+                      {onToggleExclusion && (
+                        <button
+                          onClick={() => onToggleExclusion(tx)}
+                          className={`p-1.5 rounded transition-colors ${
+                            tx.budget_excluded
+                              ? 'text-amber-600 hover:bg-amber-50'
+                              : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
+                          }`}
+                          title={tx.budget_excluded ? 'Include in budgets' : 'Exclude from budgets'}
+                        >
+                          {tx.budget_excluded ? <EyeOff size={15} /> : <Eye size={15} />}
+                        </button>
+                      )}
                       <button
                         onClick={() => onEdit(tx)}
                         className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
