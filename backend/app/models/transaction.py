@@ -1,7 +1,7 @@
 import uuid
 from datetime import date
 
-from sqlalchemy import Boolean, Date, ForeignKey, Numeric, String, Text
+from sqlalchemy import Boolean, Date, ForeignKey, Index, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -10,6 +10,21 @@ from app.db.base import Base, TimestampMixin
 
 class Transaction(Base, TimestampMixin):
     __tablename__ = "transactions"
+    __table_args__ = (
+        # Partial index over unenriched rows only — stays small as rows process.
+        Index(
+            "ix_transactions_ai_enriched_false",
+            "ai_enriched",
+            postgresql_where=text("ai_enriched = false"),
+        ),
+        # Covers the budget Spent aggregation (subcategory + date + exclusion).
+        Index(
+            "ix_transactions_subcat_date",
+            "subcategory_id",
+            "transaction_date",
+            "budget_excluded",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

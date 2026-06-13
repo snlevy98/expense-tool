@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, Numeric, String
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, Numeric, String, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -40,6 +40,20 @@ class SavedBalanceEvent(Base, TimestampMixin):
     """
 
     __tablename__ = "saved_balance_events"
+    __table_args__ = (
+        # Settle-once backstop (NFR-2): at most one settlement event per
+        # (subcategory, month). Recompute events are exempt (FR-4.4).
+        Index(
+            "uq_sbe_settlement",
+            "subcategory_id",
+            "year",
+            "month",
+            unique=True,
+            postgresql_where=text(
+                "reason IN ('month_close_surplus', 'month_close_coverage')"
+            ),
+        ),
+    )
 
     REASON_SURPLUS = "month_close_surplus"
     REASON_COVERAGE = "month_close_coverage"
