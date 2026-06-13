@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { getTransactions, updateTransaction, deleteTransaction } from '../services/transactionService'
 
 const DEFAULT_FILTERS = {
@@ -16,10 +17,21 @@ const DEFAULT_FILTERS = {
 const PAGE_SIZE = 50
 
 export const useTransactions = () => {
+  const [searchParams] = useSearchParams()
+
   const [transactions, setTransactions] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [filters, setFilters] = useState(DEFAULT_FILTERS)
+  // Seed filters from the URL once on mount so drill-down links (e.g. from the
+  // Budgets page) land pre-filtered. Subsequent edits are driven by state.
+  const [filters, setFilters] = useState(() => {
+    const seeded = { ...DEFAULT_FILTERS }
+    for (const key of Object.keys(DEFAULT_FILTERS)) {
+      const v = searchParams.get(key)
+      if (v != null && v !== '') seeded[key] = v
+    }
+    return seeded
+  })
   const [sortBy, setSortBy] = useState('date')
   const [sortDir, setSortDir] = useState('desc')
   const [page, setPage] = useState(0)

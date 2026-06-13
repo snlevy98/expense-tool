@@ -1,7 +1,8 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Check, ChevronDown, ChevronRight, Loader2, Lock, LockOpen,
-  Pencil, Plus, Sparkles, Trash2, X,
+  Pencil, PiggyBank, Plus, Sparkles, Trash2, X,
 } from 'lucide-react'
 import MonthSwitcher from '../components/MonthSwitcher'
 import { useBudget } from '../hooks/useBudget'
@@ -77,33 +78,72 @@ function AmountCell({ value, onSave, disabled }) {
   )
 }
 
-// ── Status badge (interim — progress bars land with the dashboard rework) ──
+// ── Subcategory progress bar (four envelope states) ─────────────────────────
 
-const STATUS_STYLES = {
-  on_track: 'bg-emerald-50 text-emerald-700',
-  approaching: 'bg-amber-50 text-amber-700',
-  covered: 'bg-blue-50 text-blue-700',
-  over: 'bg-red-50 text-red-700',
+const BAR_FILL = {
+  on_track: 'bg-emerald-500',
+  approaching: 'bg-amber-500',
+  over: 'bg-red-500',
 }
 
-const STATUS_LABELS = {
-  on_track: 'On track',
-  approaching: 'Approaching',
-  covered: 'Covered',
-  over: 'Over',
+// "Covered" overage is drawn from savings — a blue diagonal stripe signals it
+// differs from ordinary spend-within-cap.
+const COVERED_STRIPES = {
+  backgroundImage:
+    'repeating-linear-gradient(45deg, #3b82f6 0, #3b82f6 4px, #60a5fa 4px, #60a5fa 8px)',
 }
 
-function StatusBadge({ status }) {
+const LABEL_COLOR = {
+  on_track: 'text-slate-400',
+  approaching: 'text-amber-600',
+  covered: 'text-blue-600',
+  over: 'text-red-600',
+}
+
+function ProgressBar({ row }) {
+  const cap = parseFloat(row.cap) || 0
+  const spent = parseFloat(row.spent) || 0
+  const pct = cap > 0 ? (spent / cap) * 100 : spent > 0 ? 100 : 0
+  const width = Math.max(0, Math.min(100, pct))
+  const covered = parseFloat(row.covered_overage) || 0
+  const netOver = parseFloat(row.net_overage) || 0
+
+  let label
+  if (row.status === 'over') label = `${formatCurrency(netOver)} over`
+  else if (row.status === 'covered') label = `${formatCurrency(covered)} covered`
+  else label = `${Math.round(pct)}%`
+
   return (
-    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[status] || ''}`}>
-      {STATUS_LABELS[status] || status}
+    <div className="w-full" title={`${formatCurrency(spent)} of ${formatCurrency(cap)}`}>
+      <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all ${row.status === 'covered' ? '' : BAR_FILL[row.status] || 'bg-slate-300'}`}
+          style={{ width: `${width}%`, ...(row.status === 'covered' ? COVERED_STRIPES : {}) }}
+        />
+      </div>
+      <span className={`mt-0.5 block text-[11px] tabular-nums ${LABEL_COLOR[row.status] || 'text-slate-400'}`}>
+        {label}
+      </span>
+    </div>
+  )
+}
+
+// ── Saved-balance chip ───────────────────────────────────────────────────────
+
+function SavedChip({ value }) {
+  const v = parseFloat(value) || 0
+  if (v <= 0) return <span className="text-slate-300">—</span>
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 tabular-nums">
+      <PiggyBank size={12} />
+      {formatCurrency(v)}
     </span>
   )
 }
 
 // ── Category group ──────────────────────────────────────────────────────────
 
-function CategoryGroup({ group, isClosed, onSaveCap, onToggleLock, onRemove }) {
+function CategoryGroup({ group, isClosed, onSaveCap, onToggleLock, onRemove, onDrill }) {
   const [expanded, setExpanded] = useState(true)
 
   return (
@@ -137,7 +177,15 @@ function CategoryGroup({ group, isClosed, onSaveCap, onToggleLock, onRemove }) {
 
       {expanded && group.subcategories.map((sub) => (
         <tr key={sub.subcategory_id} className="hover:bg-slate-50">
-          <td className="table-cell pl-10 text-slate-600">{sub.subcategory_name}</td>
+          <td className="table-cell pl-10">
+            <button
+              onClick={() => onDrill(group.category_id, sub.subcategory_id)}
+              className="text-left text-slate-600 hover:text-indigo-600 hover:underline transition-colors"
+              title="View this subcategory's transactions for this month"
+            >
+              {sub.subcategory_name}
+            </button>
+          </td>
           <td className="table-cell">
             <AmountCell
               value={parseFloat(sub.cap) || 0}
@@ -148,14 +196,9 @@ function CategoryGroup({ group, isClosed, onSaveCap, onToggleLock, onRemove }) {
           <td className="table-cell tabular-nums text-slate-600">{formatCurrency(sub.spent)}</td>
           <td className={`table-cell tabular-nums ${parseFloat(sub.remaining) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
             {formatCurrency(sub.remaining)}
-            {parseFloat(sub.covered_overage) > 0 && (
-              <span className="ml-1.5 text-xs text-blue-600">
-                ({formatCurrency(sub.covered_overage)} covered)
-              </span>
-            )}
           </td>
-          <td className="table-cell tabular-nums text-slate-500">{formatCurrency(sub.saved_balance)}</td>
-          <td className="table-cell"><StatusBadge status={sub.status} /></td>
+          <td className="table-cell"><SavedChip value={sub.saved_balance} /></td>
+          <td className="table-cell"><ProgressBar row={sub} /></td>
           <td className="table-cell">
             <div className="flex items-center gap-1">
               <button
@@ -454,6 +497,7 @@ function AutoSuggestModal({ defaultAllocation, onApply, onClose }) {
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export default function Budgets() {
+  const navigate = useNavigate()
   const setMonth = useAppStore((s) => s.setMonth)
   const {
     data,
@@ -494,6 +538,20 @@ export default function Budgets() {
     for (const item of items) {
       await saveCap(item.subcategory_id, item.amount)
     }
+  }
+
+  // Drill-down: open the Transactions page pre-filtered to this subcategory for
+  // the selected month (date_to is inclusive on the backend).
+  const handleDrill = (categoryId, subcategoryId) => {
+    const mm = String(selectedMonth).padStart(2, '0')
+    const lastDay = new Date(selectedYear, selectedMonth, 0).getDate()
+    const params = new URLSearchParams({
+      category_id: categoryId,
+      subcategory_id: subcategoryId,
+      date_from: `${selectedYear}-${mm}-01`,
+      date_to: `${selectedYear}-${mm}-${String(lastDay).padStart(2, '0')}`,
+    })
+    navigate(`/transactions?${params.toString()}`)
   }
 
   return (
@@ -571,7 +629,7 @@ export default function Budgets() {
                 <th className="table-header">Spent</th>
                 <th className="table-header">Remaining</th>
                 <th className="table-header">Saved</th>
-                <th className="table-header">Status</th>
+                <th className="table-header w-44">Progress</th>
                 <th className="table-header w-20" />
               </tr>
             </thead>
@@ -601,6 +659,7 @@ export default function Budgets() {
                     onSaveCap={wrap(saveCap)}
                     onToggleLock={wrap(toggleLock)}
                     onRemove={handleRemove}
+                    onDrill={handleDrill}
                   />
                 ))
               )}
