@@ -504,6 +504,8 @@ async def apply_exclusion_rules(
 
 _FIVE = Decimal("5")
 _SUGGEST_TIMEOUT = 15.0  # whole provider chain; no per-call retry ladder here
+_MONTH_NAME = ["", "January", "February", "March", "April", "May", "June",
+               "July", "August", "September", "October", "November", "December"]
 
 
 def _round_to_5(v: Decimal) -> Decimal:
@@ -561,6 +563,17 @@ async def suggest_budget_v2(
 
     history = await _gather_history(db, month, year, months_back)
 
+    # Seasonality (FR-5.2a): with ≥12 months of history, give the model the
+    # upcoming month's identity and same-month-last-year spend per subcategory.
+    earliest = await db.scalar(select(func.min(Transaction.transaction_date)))
+    seasonal = (
+        earliest is not None
+        and (year - earliest.year) * 12 + (month - earliest.month) >= 12
+    )
+    prior_year_spent = (
+        await budget_math.get_spent_by_subcategory(db, month, year - 1) if seasonal else {}
+    )
+
     # Candidate set: every budgeted subcategory, plus unbudgeted ones that have
     # real spending history (FR-5.8 unbudgeted-candidate flagging).
     candidates: list[dict] = []
@@ -587,6 +600,7 @@ async def suggest_budget_v2(
                 "saved_balance": balance_map.get(sub.id, ZERO),
                 "monthly_avg": avg.quantize(Decimal("0.01")),
                 "historical_max": hist_max.quantize(Decimal("0.01")),
+                "prior_year_same_month": max(ZERO, prior_year_spent.get(sub.id, ZERO)).quantize(Decimal("0.01")),
                 "heuristic": heuristic,
                 "is_budgeted": is_budgeted,
             })
@@ -599,6 +613,8 @@ async def suggest_budget_v2(
         context = {
             "last_month_income": income,
             "months_back": months_back,
+            "seasonal": seasonal,
+            "upcoming_month": _MONTH_NAME[month],
             "items": [
                 {
                     "subcategory_id": str(c["sub"].id),
@@ -608,6 +624,7 @@ async def suggest_budget_v2(
                     "historical_max": c["historical_max"],
                     "current_cap": c["current_cap"],
                     "locked": c["locked"],
+                    "prior_year_same_month": c["prior_year_same_month"],
                 }
                 for c in candidates
             ],

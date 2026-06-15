@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from app.models.budget import Budget
 from app.schemas.budget import ApplySuggestionItem
-from app.services import budget_service
+from app.services import ai_service, budget_service
 
 
 def D(v) -> Decimal:
@@ -153,3 +153,64 @@ class TestApplySuggestions:
         )
         caps = {b.subcategory_id: D(b.amount) for b in rows.scalars().all()}
         assert caps == {sub1.id: D("100"), sub2.id: D("250")}
+
+
+class TestSeasonality:
+    @pytest.fixture
+    def capture_ai(self, monkeypatch):
+        captured = {}
+        async def _capture(context):
+            captured["context"] = context
+            return ({}, "groq")
+        monkeypatch.setattr(budget_service.ai_service, "suggest_budget_v2", _capture)
+        return captured
+
+    async def test_seasonal_inputs_when_12_months_history(
+        self, db_session, capture_ai, make_account, make_category, make_subcategory,
+        make_transaction,
+    ):
+        acct = await make_account()
+        cat = await make_category()
+        sub = await make_subcategory(cat)
+        # Same month last year (June 2025) → seasonal comparison input; this also
+        # makes the earliest txn exactly 12 months before the June 2026 target.
+        await make_transaction(acct, sub, "2025-06-15", amount=D("500"))
+        await make_transaction(acct, sub, "2026-05-10", amount=D("100"))
+
+        await budget_service.suggest_budget_v2(db_session, 6, 2026)
+
+        ctx = capture_ai["context"]
+        assert ctx["seasonal"] is True
+        assert ctx["upcoming_month"] == "June"
+        item = next(i for i in ctx["items"] if i["subcategory_id"] == str(sub.id))
+        assert D(item["prior_year_same_month"]) == D("500")
+
+    async def test_not_seasonal_when_history_too_short(
+        self, db_session, capture_ai, make_account, make_category, make_subcategory,
+        make_transaction,
+    ):
+        acct = await make_account()
+        cat = await make_category()
+        sub = await make_subcategory(cat)
+        await make_transaction(acct, sub, "2026-05-10", amount=D("100"))  # ~1 month
+
+        await budget_service.suggest_budget_v2(db_session, 6, 2026)
+
+        assert capture_ai["context"]["seasonal"] is False
+
+    def test_prompt_includes_seasonal_section_only_when_seasonal(self):
+        base_item = {
+            "subcategory_id": "x", "category_name": "Food", "subcategory_name": "Dining",
+            "monthly_avg": D("100"), "historical_max": D("200"),
+            "current_cap": D("0"), "locked": False, "prior_year_same_month": D("150"),
+        }
+        ctx = {
+            "last_month_income": D("1000"), "months_back": 6,
+            "seasonal": True, "upcoming_month": "June", "items": [base_item],
+        }
+        prompt = ai_service._build_suggest_prompt(ctx)
+        assert "same_month_last_year" in prompt
+        assert "June" in prompt
+
+        ctx_off = {**ctx, "seasonal": False, "upcoming_month": None}
+        assert "same_month_last_year" not in ai_service._build_suggest_prompt(ctx_off)

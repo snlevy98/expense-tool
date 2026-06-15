@@ -281,6 +281,7 @@ Output raw JSON only — no explanation, no markdown."""
 
 
 def _build_suggest_prompt(context: dict) -> str:
+    seasonal = bool(context.get("seasonal"))
     items_text = json.dumps(
         [
             {
@@ -291,15 +292,27 @@ def _build_suggest_prompt(context: dict) -> str:
                 "historical_max": round(float(it["historical_max"]), 2),
                 "current_cap": round(float(it["current_cap"]), 2),
                 "locked": it["locked"],
+                **(
+                    {"same_month_last_year": round(float(it.get("prior_year_same_month", 0)), 2)}
+                    if seasonal else {}
+                ),
             }
             for it in context["items"]
         ],
         indent=2,
     )
+    seasonal_block = (
+        f"\nThis budget is for {context.get('upcoming_month')}. Spending in some "
+        f"subcategories is seasonal — compare each one's same_month_last_year figure "
+        f"to its average and adjust the cap up or down to suit the season. Whenever "
+        f"you make a seasonal adjustment, state it explicitly in that subcategory's "
+        f"rationale.\n"
+        if seasonal else ""
+    )
     return f"""You are a personal finance budget advisor.
 
 Last month's take-home income was ${float(context['last_month_income']):.2f}.
-
+{seasonal_block}
 Below is each expense subcategory with its netted average monthly spending and
 peak monthly spending over the last {context['months_back']} months, its current
 monthly cap (0 = not yet budgeted), and whether it is locked:
