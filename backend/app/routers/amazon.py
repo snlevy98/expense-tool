@@ -8,13 +8,18 @@ POST /amazon/apply-groceries       — bulk update matched grocery transactions
 POST /amazon/itemize               — create individual item transactions, remove parent
 """
 
+import asyncio
 import io
 import logging
+import os
 import re
+import sys
+import tempfile
 import uuid
 from collections import Counter
 from datetime import date as date_type, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -35,6 +40,12 @@ router = APIRouter(prefix="/amazon", tags=["amazon"])
 AMAZON_MERCHANT = "Amazon"
 WHOLE_FOODS_NAME = "Whole Foods Market - Uptown Dallas"
 WF_TO_VALUE = "Whole Foods Market - Uptown Dallas"
+
+# Path to the standalone Selenium scraper, relative to the repo root.
+# amazon.py lives at backend/app/routers/amazon.py → parents[3] is the repo root.
+SCRAPER_PATH = Path(__file__).resolve().parents[3] / "scripts" / "amazon_order_scraper.py"
+# Scraping with detail pages (and a manual login wait) can take a while.
+SCRAPER_TIMEOUT_SECONDS = 600  # 10 minutes
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +81,86 @@ def _parse_quantity(val) -> int:
         return n if n > 0 else 1
     except (ValueError, TypeError, AttributeError):
         return 1
+
+
+def _to_iso_date(val) -> str:
+    """Normalise a scraped date cell to 'YYYY-MM-DD' (best effort).
+
+    The matcher (`_find_amazon_txn`) reads the first 10 chars as an ISO date, so
+    we coerce whatever the scraper emitted (e.g. 'April 21, 2026') into that form.
+    """
+    try:
+        ts = pd.to_datetime(str(val).strip(), errors="coerce")
+        if pd.isna(ts):
+            return str(val).strip()
+        return ts.date().isoformat()
+    except (ValueError, TypeError):
+        return str(val).strip()
+
+
+def _parse_scraped_csv(
+    df: pd.DataFrame,
+) -> tuple[list[dict], dict[str, list[dict]], set[str]]:
+    """Map the single-file scraper output (one row per item) into the normalised
+    structures consumed by `_build_analysis`:
+
+      orders            — one dict per order: {order_id, order_date, to, amount}
+      items_by_order    — order_id → list of {description, price, quantity, asin}
+      grocery_order_ids — orders shipped to / sold by Whole Foods
+
+    The scraper emits these columns (see scripts/amazon_order_scraper.py):
+      Order Date, Order ID, Order Total, Order Status, Shipping Address Name,
+      Item Subtotal, Item Subtotal Tax, Item Total, ASIN, Product Name,
+      Quantity, Payment Type, Seller
+    """
+    df.columns = [c.strip().lower().lstrip("﻿") for c in df.columns]
+
+    required = {"order id", "order date", "order total", "product name"}
+    missing = required - set(df.columns)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Scraped file is missing columns: {missing}. "
+                   "The scraper output format may have changed.",
+        )
+
+    orders: dict[str, dict] = {}
+    items_by_order: dict[str, list[dict]] = {}
+    grocery_order_ids: set[str] = set()
+
+    for _, row in df.iterrows():
+        oid = str(row["order id"]).strip()
+        if not oid or oid.lower() in ("nan", "none"):
+            continue
+
+        # Order-level fields are repeated on every item row — capture once.
+        if oid not in orders:
+            orders[oid] = {
+                "order_id": oid,
+                "order_date": _to_iso_date(row.get("order date", "")),
+                "to": str(row.get("shipping address name", "")).strip(),
+                "amount": _parse_price(row.get("order total", "0")),
+            }
+
+        # Prefer the per-item total; fall back to the pre-tax subtotal.
+        price_cell = row.get("item total")
+        if price_cell is None or str(price_cell).strip().lower() in ("", "nan"):
+            price_cell = row.get("item subtotal", "0")
+
+        items_by_order.setdefault(oid, []).append({
+            "description": str(row.get("product name", "")).strip(),
+            "price": _parse_price(price_cell),
+            "quantity": _parse_quantity(row.get("quantity", 1)),
+            "asin": str(row.get("asin", "")).strip(),
+        })
+
+        # Grocery detection mirrors the two-file flow (ship-to == Whole Foods),
+        # with a seller-name fallback since the scraper exposes the seller too.
+        seller = str(row.get("seller", "")).strip().lower()
+        if orders[oid]["to"] == WF_TO_VALUE or "whole foods" in seller:
+            grocery_order_ids.add(oid)
+
+    return list(orders.values()), items_by_order, grocery_order_ids
 
 
 async def _find_amazon_txn(
@@ -149,6 +240,11 @@ class AmazonAnalysisResponse(BaseModel):
     unmatched: list[UnmatchedOrder]
 
 
+class PullAndImportRequest(BaseModel):
+    months: int | None = None  # scrape the last N months
+    year: int | None = None    # scrape a calendar year (mutually exclusive with months)
+
+
 class ApplyGroceryItem(BaseModel):
     transaction_id: uuid.UUID
     order_id: str
@@ -196,6 +292,146 @@ async def amazon_uncategorized_count(
         )
     )
     return {"count": result.scalar_one()}
+
+
+async def _build_analysis(
+    db: AsyncSession,
+    orders: list[dict],
+    items_by_order: dict[str, list[dict]],
+    grocery_order_ids: set[str],
+) -> AmazonAnalysisResponse:
+    """Shared core of the Amazon analysis, independent of the input format.
+
+    Given a normalised order list, items grouped by order, and the set of grocery
+    order IDs, this AI-suggests categories for non-grocery items and matches every
+    order to an uncategorised Amazon DB transaction. Both the two-file CSV upload
+    (`/analyze`) and the scraper flow (`/pull-and-import`) funnel through here.
+    """
+    # --- Load categories for AI ---
+    cat_result = await db.execute(
+        select(Category).options(selectinload(Category.subcategories))
+    )
+    categories = cat_result.scalars().all()
+    category_dicts = [
+        {
+            "id": str(c.id),
+            "name": c.name,
+            "subcategories": [{"id": str(s.id), "name": s.name} for s in c.subcategories],
+        }
+        for c in categories
+    ]
+
+    # --- Build flat item list for AI (non-grocery only) ---
+    ai_items: list[dict] = []
+    ai_item_map: list[tuple[str, int]] = []  # (order_id, item_index)
+
+    for order in orders:
+        oid = order["order_id"]
+        if oid in grocery_order_ids:
+            continue
+        for i, item in enumerate(items_by_order.get(oid, [])):
+            if item["description"]:
+                ai_items.append({
+                    "index": len(ai_items),
+                    "merchant_name": item["description"],
+                    "raw_description": item["description"],
+                    "amount": str(item["price"]),
+                })
+                ai_item_map.append((oid, i))
+
+    # --- AI category suggestions ---
+    suggestions_map: dict[int, dict] = {}
+    if ai_items:
+        try:
+            suggestions = await ai_service.suggest_categories(ai_items, category_dicts)
+            suggestions_map = {s["index"]: s for s in suggestions if isinstance(s, dict)}
+        except ai_service.RateLimitError:
+            logger.warning("AI rate limited during Amazon analysis — proceeding without suggestions")
+        except Exception:
+            logger.exception("AI suggestion failed during Amazon analysis")
+
+    # Attach suggestions back to items
+    for flat_idx, (oid, item_i) in enumerate(ai_item_map):
+        s = suggestions_map.get(flat_idx, {})
+        item = items_by_order[oid][item_i]
+        try:
+            item["suggested_category_id"] = (
+                uuid.UUID(s["category_id"]) if s.get("category_id") else None
+            )
+            item["suggested_subcategory_id"] = (
+                uuid.UUID(s["subcategory_id"]) if s.get("subcategory_id") else None
+            )
+        except (ValueError, AttributeError):
+            item["suggested_category_id"] = None
+            item["suggested_subcategory_id"] = None
+
+    # --- Match each order to a DB transaction ---
+    grocery_matches: list[GroceryMatch] = []
+    regular_orders: list[RegularOrder] = []
+    unmatched: list[UnmatchedOrder] = []
+
+    for order in orders:
+        oid = order["order_id"]
+        order_date = order["order_date"]
+        to_field = order["to"]
+        amount = order["amount"]
+
+        if amount is None or amount <= 0:
+            unmatched.append(UnmatchedOrder(
+                order_id=oid, order_date=order_date, to=to_field,
+                amount=None, reason="no_payment_amount",
+            ))
+            continue
+
+        is_grocery = oid in grocery_order_ids
+        txn = await _find_amazon_txn(db, amount, order_date)
+
+        if is_grocery:
+            order_items = items_by_order.get(oid, [])
+            summary_parts = [i["description"] for i in order_items[:5] if i["description"]]
+            summary = "; ".join(summary_parts)
+            if len(order_items) > 5:
+                summary += f" … +{len(order_items) - 5} more"
+            grocery_matches.append(GroceryMatch(
+                order_id=oid,
+                order_date=order_date,
+                transaction_id=txn.id if txn else None,
+                transaction_date=str(txn.transaction_date) if txn else None,
+                amount=amount,
+                items_summary=summary,
+            ))
+        else:
+            order_items = items_by_order.get(oid, [])
+            if txn:
+                regular_orders.append(RegularOrder(
+                    order_id=oid,
+                    order_date=order_date,
+                    transaction_id=txn.id,
+                    transaction_date=str(txn.transaction_date),
+                    amount=amount,
+                    items=[
+                        AnalyzeOrderItem(
+                            description=it["description"],
+                            price=it["price"],
+                            quantity=it["quantity"],
+                            asin=it["asin"],
+                            suggested_category_id=it.get("suggested_category_id"),
+                            suggested_subcategory_id=it.get("suggested_subcategory_id"),
+                        )
+                        for it in order_items
+                    ],
+                ))
+            else:
+                unmatched.append(UnmatchedOrder(
+                    order_id=oid, order_date=order_date, to=to_field,
+                    amount=amount, reason="no_transaction_found",
+                ))
+
+    return AmazonAnalysisResponse(
+        grocery_matches=grocery_matches,
+        regular_orders=regular_orders,
+        unmatched=unmatched,
+    )
 
 
 @router.post("/analyze", response_model=AmazonAnalysisResponse)
@@ -260,133 +496,105 @@ async def analyze_orders(
             "asin": str(row.get("asin", "")).strip(),
         })
 
-    # --- Load categories for AI ---
-    cat_result = await db.execute(
-        select(Category).options(selectinload(Category.subcategories))
-    )
-    categories = cat_result.scalars().all()
-    category_dicts = [
+    # --- Build the normalised order list (amount comes from the payments string) ---
+    orders = [
         {
-            "id": str(c.id),
-            "name": c.name,
-            "subcategories": [{"id": str(s.id), "name": s.name} for s in c.subcategories],
+            "order_id": str(order_row["order id"]),
+            "order_date": str(order_row.get("date", "")).strip(),
+            "to": str(order_row.get("to", "")).strip(),
+            "amount": _extract_payment_amount(str(order_row.get("payments", ""))),
         }
-        for c in categories
+        for _, order_row in orders_df.iterrows()
     ]
 
-    # --- Build flat item list for AI (non-grocery only) ---
-    non_grocery_order_ids = set(
-        orders_df[
-            orders_df["to"].astype(str).str.strip() != WF_TO_VALUE
-        ]["order id"].astype(str)
-    )
-    ai_items: list[dict] = []
-    ai_item_map: list[tuple[str, int]] = []  # (order_id, item_index)
+    return await _build_analysis(db, orders, items_by_order, grocery_order_ids)
 
-    for oid in non_grocery_order_ids:
-        for i, item in enumerate(items_by_order.get(oid, [])):
-            if item["description"]:
-                ai_items.append({
-                    "index": len(ai_items),
-                    "merchant_name": item["description"],
-                    "raw_description": item["description"],
-                    "amount": str(item["price"]),
-                })
-                ai_item_map.append((oid, i))
 
-    # --- AI category suggestions ---
-    suggestions_map: dict[int, dict] = {}
-    if ai_items:
+@router.post("/pull-and-import", response_model=AmazonAnalysisResponse)
+async def pull_and_import(
+    body: PullAndImportRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> AmazonAnalysisResponse:
+    """
+    Run the Selenium order-history scraper as a subprocess, then feed its output
+    through the same analysis pipeline as the manual two-file upload.
+
+    A Chrome window opens on the *host running this backend* for manual login, so
+    this is intended for a locally-run backend — a headless server has no display
+    for the login step.
+    """
+    if body.months is not None and body.year is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either 'months' or 'year', not both.",
+        )
+    if not SCRAPER_PATH.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Scraper script not found at {SCRAPER_PATH}.",
+        )
+
+    # delete=False so the subprocess can reopen the path; we clean it up in finally.
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+    tmp.close()
+    tmp_path = tmp.name
+
+    try:
+        cmd = [sys.executable, str(SCRAPER_PATH), "--output", tmp_path]
+        if body.months is not None:
+            cmd += ["--months", str(body.months)]
+        if body.year is not None:
+            cmd += ["--year", str(body.year)]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         try:
-            suggestions = await ai_service.suggest_categories(ai_items, category_dicts)
-            suggestions_map = {s["index"]: s for s in suggestions if isinstance(s, dict)}
-        except ai_service.RateLimitError:
-            logger.warning("AI rate limited during Amazon analysis — proceeding without suggestions")
-        except Exception:
-            logger.exception("AI suggestion failed during Amazon analysis")
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=SCRAPER_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise HTTPException(
+                status_code=504,
+                detail=f"Scraper timed out after {SCRAPER_TIMEOUT_SECONDS // 60} minutes.",
+            )
 
-    # Attach suggestions back to items
-    for flat_idx, (oid, item_i) in enumerate(ai_item_map):
-        s = suggestions_map.get(flat_idx, {})
-        item = items_by_order[oid][item_i]
+        if proc.returncode != 0:
+            err = (stderr.decode(errors="replace").strip()
+                   or stdout.decode(errors="replace").strip()
+                   or "unknown error")
+            logger.error("Amazon scraper exited %s: %s", proc.returncode, err)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Scraper failed: {err[:500]}",
+            )
+
+        # Parse the scraped CSV with the same engine as the manual upload.
         try:
-            item["suggested_category_id"] = (
-                uuid.UUID(s["category_id"]) if s.get("category_id") else None
+            df = pd.read_csv(tmp_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to parse scraped output: {exc}",
             )
-            item["suggested_subcategory_id"] = (
-                uuid.UUID(s["subcategory_id"]) if s.get("subcategory_id") else None
+        if df.empty:
+            raise HTTPException(
+                status_code=400,
+                detail="Scraper produced no orders for the selected range.",
             )
-        except (ValueError, AttributeError):
-            item["suggested_category_id"] = None
-            item["suggested_subcategory_id"] = None
 
-    # --- Match each order to a DB transaction ---
-    grocery_matches: list[GroceryMatch] = []
-    regular_orders: list[RegularOrder] = []
-    unmatched: list[UnmatchedOrder] = []
-
-    for _, order_row in orders_df.iterrows():
-        oid = str(order_row["order id"])
-        order_date = str(order_row.get("date", "")).strip()
-        to_field = str(order_row.get("to", "")).strip()
-        amount = _extract_payment_amount(str(order_row.get("payments", "")))
-
-        if amount is None or amount <= 0:
-            unmatched.append(UnmatchedOrder(
-                order_id=oid, order_date=order_date, to=to_field,
-                amount=None, reason="no_payment_amount",
-            ))
-            continue
-
-        is_grocery = oid in grocery_order_ids
-        txn = await _find_amazon_txn(db, amount, order_date)
-
-        if is_grocery:
-            order_items = items_by_order.get(oid, [])
-            summary_parts = [i["description"] for i in order_items[:5] if i["description"]]
-            summary = "; ".join(summary_parts)
-            if len(order_items) > 5:
-                summary += f" … +{len(order_items) - 5} more"
-            grocery_matches.append(GroceryMatch(
-                order_id=oid,
-                order_date=order_date,
-                transaction_id=txn.id if txn else None,
-                transaction_date=str(txn.transaction_date) if txn else None,
-                amount=amount,
-                items_summary=summary,
-            ))
-        else:
-            order_items = items_by_order.get(oid, [])
-            if txn:
-                regular_orders.append(RegularOrder(
-                    order_id=oid,
-                    order_date=order_date,
-                    transaction_id=txn.id,
-                    transaction_date=str(txn.transaction_date),
-                    amount=amount,
-                    items=[
-                        AnalyzeOrderItem(
-                            description=it["description"],
-                            price=it["price"],
-                            quantity=it["quantity"],
-                            asin=it["asin"],
-                            suggested_category_id=it.get("suggested_category_id"),
-                            suggested_subcategory_id=it.get("suggested_subcategory_id"),
-                        )
-                        for it in order_items
-                    ],
-                ))
-            else:
-                unmatched.append(UnmatchedOrder(
-                    order_id=oid, order_date=order_date, to=to_field,
-                    amount=amount, reason="no_transaction_found",
-                ))
-
-    return AmazonAnalysisResponse(
-        grocery_matches=grocery_matches,
-        regular_orders=regular_orders,
-        unmatched=unmatched,
-    )
+        orders, items_by_order, grocery_order_ids = _parse_scraped_csv(df)
+        return await _build_analysis(db, orders, items_by_order, grocery_order_ids)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            logger.warning("Could not delete temp scraper file %s", tmp_path)
 
 
 @router.post("/apply-groceries")

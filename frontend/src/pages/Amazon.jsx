@@ -9,6 +9,7 @@ import {
   ChevronUp,
   Leaf,
   Package,
+  Download,
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useCategories } from '../hooks/useCategories'
@@ -350,16 +351,54 @@ function OrderCard({ order, categories, onConfirm }) {
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
+const CURRENT_YEAR = new Date().getFullYear()
+
 export default function Amazon() {
   const { categories } = useCategories()
   const fetchAmazonUncategorizedCount = useAppStore((s) => s.fetchAmazonUncategorizedCount)
   const amazonUncategorizedCount = useAppStore((s) => s.amazonUncategorizedCount)
+
+  // "Pull Order History" lifecycle (persisted in the store across tab navigation)
+  const pullAmazonOrders = useAppStore((s) => s.pullAmazonOrders)
+  const amazonPullStatus = useAppStore((s) => s.amazonPullStatus)
+  const amazonPullError = useAppStore((s) => s.amazonPullError)
+  const amazonPullResult = useAppStore((s) => s.amazonPullResult)
 
   const [ordersFile, setOrdersFile] = useState(null)
   const [itemsFile, setItemsFile] = useState(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [analysis, setAnalysis] = useState(null)
   const [error, setError] = useState(null)
+
+  // Filter for the automatic pull
+  const [range, setRange] = useState('3m') // 'all' | '3m' | '6m' | '12m' | 'year'
+  const [pullYear, setPullYear] = useState(CURRENT_YEAR)
+
+  const pulling = amazonPullStatus !== 'idle'
+  const pullLoadingText =
+    amazonPullStatus === 'opening'
+      ? 'Opening Chrome — please log in to Amazon…'
+      : 'Scraping order history… this may take a few minutes'
+
+  // Either flow feeds the same review UI; a fresh pull result wins.
+  const displayAnalysis = analysis || amazonPullResult
+
+  const handlePull = async () => {
+    let params = {}
+    if (range === '3m') params = { months: 3 }
+    else if (range === '6m') params = { months: 6 }
+    else if (range === '12m') params = { months: 12 }
+    else if (range === 'year') params = { year: Number(pullYear) || CURRENT_YEAR }
+    // 'all' → no params (scrape everything)
+
+    setAnalysis(null) // drop any manual-upload result so the pull result shows
+    try {
+      await pullAmazonOrders(params)
+      fetchAmazonUncategorizedCount()
+    } catch {
+      // error is surfaced via amazonPullError in the store
+    }
+  }
 
   const handleAnalyze = async () => {
     if (!ordersFile || !itemsFile) {
@@ -395,9 +434,9 @@ export default function Amazon() {
   }, [fetchAmazonUncategorizedCount])
 
   const totalMatched =
-    analysis
-      ? analysis.grocery_matches.filter((m) => m.transaction_id).length +
-        analysis.regular_orders.filter((o) => o.transaction_id).length
+    displayAnalysis
+      ? displayAnalysis.grocery_matches.filter((m) => m.transaction_id).length +
+        displayAnalysis.regular_orders.filter((o) => o.transaction_id).length
       : 0
 
   return (
@@ -462,37 +501,100 @@ export default function Amazon() {
         </div>
       </div>
 
+      {/* Pull-from-Amazon card */}
+      <div className="card space-y-4">
+        <div className="flex items-center gap-2">
+          <ShoppingCart size={18} className="text-indigo-600" />
+          <h2 className="text-base font-semibold text-slate-700">Pull Order History Automatically</h2>
+        </div>
+        <p className="text-sm text-slate-500">
+          Skip the manual export — pull your recent orders straight from Amazon and import them in one step.
+        </p>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-sm text-slate-600">Range:</span>
+          <select
+            className="input py-1 text-sm min-w-[160px]"
+            value={range}
+            onChange={(e) => setRange(e.target.value)}
+            disabled={pulling}
+          >
+            <option value="all">All time</option>
+            <option value="3m">Last 3 months</option>
+            <option value="6m">Last 6 months</option>
+            <option value="12m">Last 12 months</option>
+            <option value="year">Specific year</option>
+          </select>
+          {range === 'year' && (
+            <input
+              type="number"
+              min="2000"
+              max={CURRENT_YEAR}
+              value={pullYear}
+              onChange={(e) => setPullYear(e.target.value)}
+              disabled={pulling}
+              className="input py-1 text-sm w-28"
+              placeholder="Year"
+            />
+          )}
+        </div>
+
+        {amazonPullError && (
+          <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+            <AlertCircle size={15} />
+            {amazonPullError}
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <button
+            onClick={handlePull}
+            disabled={pulling}
+            className="btn-primary"
+          >
+            {pulling ? (
+              <><Loader2 size={15} className="animate-spin mr-1.5" /> {pullLoadingText}</>
+            ) : (
+              <><Download size={15} className="mr-1.5" /> Pull Order History</>
+            )}
+          </button>
+          <p className="text-xs text-slate-400">
+            A Chrome window will open. Log in to Amazon if prompted, then wait — the import will complete automatically.
+          </p>
+        </div>
+      </div>
+
       {/* Results */}
-      {analysis && (
+      {displayAnalysis && (
         <div className="space-y-4">
           {/* Summary banner */}
           <div className="card p-4 bg-indigo-50 border border-indigo-200 text-indigo-800 text-sm flex items-center gap-2">
             <CheckCircle size={16} />
             <span>
               Found <strong>{totalMatched}</strong> matching transaction{totalMatched !== 1 ? 's' : ''}
-              {analysis.unmatched.length > 0 && (
-                <> · <span className="text-amber-700">{analysis.unmatched.length} order{analysis.unmatched.length !== 1 ? 's' : ''} not matched</span></>
+              {displayAnalysis.unmatched.length > 0 && (
+                <> · <span className="text-amber-700">{displayAnalysis.unmatched.length} order{displayAnalysis.unmatched.length !== 1 ? 's' : ''} not matched</span></>
               )}
             </span>
           </div>
 
           {/* Grocery section */}
-          {analysis.grocery_matches.length > 0 && (
+          {displayAnalysis.grocery_matches.length > 0 && (
             <GrocerySection
-              matches={analysis.grocery_matches}
+              matches={displayAnalysis.grocery_matches}
               categories={categories}
               onApply={handleApplyGroceries}
             />
           )}
 
           {/* Regular orders */}
-          {analysis.regular_orders.length > 0 && (
+          {displayAnalysis.regular_orders.length > 0 && (
             <div className="space-y-3">
               <h3 className="font-semibold text-slate-800 flex items-center gap-2">
                 <Package size={17} className="text-indigo-500" />
-                Regular Orders — {analysis.regular_orders.length} order{analysis.regular_orders.length !== 1 ? 's' : ''}
+                Regular Orders — {displayAnalysis.regular_orders.length} order{displayAnalysis.regular_orders.length !== 1 ? 's' : ''}
               </h3>
-              {analysis.regular_orders.map((order) => (
+              {displayAnalysis.regular_orders.map((order) => (
                 <OrderCard
                   key={order.order_id}
                   order={order}
@@ -504,11 +606,11 @@ export default function Amazon() {
           )}
 
           {/* Unmatched orders */}
-          {analysis.unmatched.length > 0 && (
+          {displayAnalysis.unmatched.length > 0 && (
             <div className="card space-y-3">
               <h3 className="font-semibold text-slate-800 flex items-center gap-2">
                 <AlertCircle size={17} className="text-amber-500" />
-                Unmatched Orders ({analysis.unmatched.length})
+                Unmatched Orders ({displayAnalysis.unmatched.length})
               </h3>
               <p className="text-sm text-slate-500">
                 These orders couldn't be matched to an existing transaction. They may have been
@@ -525,7 +627,7 @@ export default function Amazon() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {analysis.unmatched.map((o) => (
+                    {displayAnalysis.unmatched.map((o) => (
                       <tr key={o.order_id} className="opacity-70">
                         <td className="table-cell text-xs font-mono">{o.order_id.slice(-12)}</td>
                         <td className="table-cell text-slate-500">{o.order_date}</td>
@@ -552,7 +654,7 @@ export default function Amazon() {
       )}
 
       {/* Empty state — no uncategorized, no analysis */}
-      {!analysis && amazonUncategorizedCount === 0 && (
+      {!displayAnalysis && amazonUncategorizedCount === 0 && (
         <div className="card text-center py-14">
           <ShoppingCart size={44} className="mx-auto text-slate-300 mb-4" />
           <h2 className="text-lg font-semibold text-slate-700 mb-1">No uncategorized Amazon transactions</h2>

@@ -1,0 +1,10 @@
+# Dependencies for the standalone Amazon order-history scraper
+# (scripts/amazon_order_scraper.py). Kept separate from backend/requirements.txt
+# because the scraper drives a real Chrome window and is only run on a machine
+# with a display — never on the headless Render web service.
+#
+#   pip install -r scripts/requirements.txt
+#
+# Selenium 4.6+ bundles Selenium Manager, which auto-downloads a matching
+# chromedriver, so no separate driver install is needed.
+selenium>=4.16,<5
