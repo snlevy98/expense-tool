@@ -8,8 +8,11 @@ legacy category-level rows (subcategory_id IS NULL) are historical-report
 data only.
 """
 
+import asyncio
+import logging
 import uuid
-from decimal import Decimal
+from collections import defaultdict
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +26,8 @@ from app.models.subcategory import Subcategory
 from app.models.transaction import Transaction
 from app.schemas.budget import (
     BudgetDashboardResponse,
+    BudgetSuggestionItem,
+    BudgetSuggestResponse,
     BudgetSummary,
     CategoryBudgetGroup,
     ExclusionRuleCreate,
@@ -30,8 +35,10 @@ from app.schemas.budget import (
     SubcategoryBudgetRow,
     UnbudgetedSubcategory,
 )
-from app.services import budget_lifecycle, budget_math
+from app.services import ai_service, budget_lifecycle, budget_math
 from app.services.budget_math import ZERO
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -487,3 +494,203 @@ async def apply_exclusion_rules(
         await db.flush()
         await budget_lifecycle.reconcile_transaction_change(db, snapshots)
     return changed
+
+
+# ---------------------------------------------------------------------------
+# AI budget suggestions v2 (FR-5)
+# ---------------------------------------------------------------------------
+
+_FIVE = Decimal("5")
+_SUGGEST_TIMEOUT = 15.0  # whole provider chain; no per-call retry ladder here
+
+
+def _round_to_5(v: Decimal) -> Decimal:
+    """Round to the nearest $5 multiple, floored at 0."""
+    if v <= ZERO:
+        return ZERO
+    return (v / _FIVE).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * _FIVE
+
+
+async def _gather_history(
+    db: AsyncSession, month: int, year: int, months_back: int
+) -> dict[uuid.UUID, list[Decimal]]:
+    """Per-subcategory netted monthly spend for the ``months_back`` complete
+    months before (month, year). Each list is one value per month."""
+    months: list[tuple[int, int]] = []
+    m, y = month, year
+    for _ in range(months_back):
+        m, y = budget_math.prev_month(m, y)
+        months.append((m, y))
+    months.reverse()  # oldest first, so spends[-3:] is the most recent quarter
+    per_month = [await budget_math.get_spent_by_subcategory(db, mm, yy) for mm, yy in months]
+    all_subs: set[uuid.UUID] = set().union(*[set(pm) for pm in per_month]) if per_month else set()
+    return {sub_id: [pm.get(sub_id, ZERO) for pm in per_month] for sub_id in all_subs}
+
+
+async def suggest_budget_v2(
+    db: AsyncSession, month: int, year: int, months_back: int = 6
+) -> BudgetSuggestResponse:
+    """History-driven cap suggestions (FR-5). AI (Groq → Gemini) within a short
+    timeout, falling back to a deterministic 3-month-average heuristic. All
+    amounts are sanitized: positive, $5 multiples, ≤3× the subcategory's
+    historical max; locked subcategories keep their current cap."""
+    months_back = max(3, min(6, months_back))
+    income = await get_last_month_income(db, month, year)
+
+    cat_result = await db.execute(
+        select(Category)
+        .where(Category.is_active == True, Category.budget_excluded == False)  # noqa: E712
+        .options(selectinload(Category.subcategories))
+    )
+    categories = cat_result.scalars().all()
+
+    budget_result = await db.execute(
+        select(Budget).where(
+            and_(Budget.month == month, Budget.year == year, Budget.subcategory_id.isnot(None))
+        )
+    )
+    budgets_by_sub = {b.subcategory_id: b for b in budget_result.scalars().all()}
+
+    balance_result = await db.execute(select(SavedBalance))
+    balance_map = {
+        sb.subcategory_id: Decimal(str(sb.balance))
+        for sb in balance_result.scalars().all()
+    }
+
+    history = await _gather_history(db, month, year, months_back)
+
+    # Candidate set: every budgeted subcategory, plus unbudgeted ones that have
+    # real spending history (FR-5.8 unbudgeted-candidate flagging).
+    candidates: list[dict] = []
+    for cat in categories:
+        for sub in cat.subcategories:
+            if not sub.is_active:
+                continue
+            b = budgets_by_sub.get(sub.id)
+            spends = history.get(sub.id, [])
+            avg = max(ZERO, sum(spends, ZERO) / Decimal(len(spends))) if spends else ZERO
+            hist_max = max(ZERO, max(spends, default=ZERO))
+            last3 = spends[-3:]
+            heuristic = _round_to_5(
+                max(ZERO, sum(last3, ZERO) / Decimal(len(last3))) if last3 else ZERO
+            )
+            is_budgeted = b is not None
+            if not is_budgeted and avg <= ZERO and hist_max <= ZERO:
+                continue
+            candidates.append({
+                "sub": sub,
+                "cat": cat,
+                "current_cap": Decimal(str(b.amount)) if b else ZERO,
+                "locked": bool(b.locked) if b else False,
+                "saved_balance": balance_map.get(sub.id, ZERO),
+                "monthly_avg": avg.quantize(Decimal("0.01")),
+                "historical_max": hist_max.quantize(Decimal("0.01")),
+                "heuristic": heuristic,
+                "is_budgeted": is_budgeted,
+            })
+
+    # AI attempt (best-effort); heuristic on any failure or timeout.
+    ai_map: dict[str, dict] = {}
+    source = "heuristic"
+    provider: str | None = None
+    if candidates:
+        context = {
+            "last_month_income": income,
+            "months_back": months_back,
+            "items": [
+                {
+                    "subcategory_id": str(c["sub"].id),
+                    "category_name": c["cat"].name,
+                    "subcategory_name": c["sub"].name,
+                    "monthly_avg": c["monthly_avg"],
+                    "historical_max": c["historical_max"],
+                    "current_cap": c["current_cap"],
+                    "locked": c["locked"],
+                }
+                for c in candidates
+            ],
+        }
+        try:
+            ai_map, provider = await asyncio.wait_for(
+                ai_service.suggest_budget_v2(context), timeout=_SUGGEST_TIMEOUT
+            )
+            source = "ai"
+        except Exception:
+            logger.exception("AI budget suggestion failed — using deterministic heuristic")
+            ai_map, provider, source = {}, None, "heuristic"
+
+    suggestions: list[BudgetSuggestionItem] = []
+    total_suggested = ZERO
+    total_locked = ZERO
+    for c in candidates:
+        sub = c["sub"]
+        rationale: str | None = None
+
+        if c["locked"]:
+            amount = c["current_cap"]
+            rationale = "Locked — cap left unchanged."
+        else:
+            amount = None
+            raw = ai_map.get(str(sub.id))
+            if raw is not None:
+                try:
+                    cand = Decimal(str(raw["amount"]))
+                    if cand > ZERO:
+                        amount = cand
+                        rationale = raw.get("rationale")
+                except (InvalidOperation, TypeError, KeyError):
+                    amount = None
+            if amount is None or amount <= ZERO:
+                amount = c["heuristic"] or _round_to_5(c["monthly_avg"])
+            amount = _round_to_5(amount)
+            if c["historical_max"] > ZERO:  # clamp to ≤ 3× historical max
+                limit = _round_to_5(c["historical_max"] * 3)
+                if amount > limit:
+                    amount = limit
+            if amount <= ZERO:
+                amount = _FIVE  # smallest positive $5 multiple
+
+        total_suggested += amount
+        if c["locked"]:
+            total_locked += amount
+
+        suggestions.append(BudgetSuggestionItem(
+            subcategory_id=sub.id,
+            subcategory_name=sub.name,
+            category_id=c["cat"].id,
+            category_name=c["cat"].name,
+            current_cap=c["current_cap"],
+            suggested_amount=amount,
+            locked=c["locked"],
+            saved_balance=c["saved_balance"],
+            monthly_avg=c["monthly_avg"],
+            historical_max=c["historical_max"],
+            is_currently_budgeted=c["is_budgeted"],
+            is_unbudgeted_candidate=not c["is_budgeted"],
+            rationale=rationale,
+        ))
+
+    return BudgetSuggestResponse(
+        source=source,
+        provider=provider,
+        month=month,
+        year=year,
+        months_analyzed=months_back,
+        last_month_income=income,
+        total_suggested=total_suggested,
+        total_locked=total_locked,
+        suggestions=suggestions,
+    )
+
+
+async def apply_suggestions(
+    db: AsyncSession, month: int, year: int, items: list
+) -> int:
+    """Bulk-set caps from accepted suggestions (replaces N sequential PUTs).
+    The caller ensures the month exists and guards closed months."""
+    applied = 0
+    for item in items:
+        budget = await set_subcategory_cap(db, item.subcategory_id, month, year, item.amount)
+        if budget is not None:
+            applied += 1
+    return applied

@@ -280,60 +280,89 @@ Output raw JSON only — no explanation, no markdown."""
         return []
 
 
-async def suggest_budget(
-    items: list[dict],
-    allocation: float,
-    months_back: int,
-) -> dict[str, float]:
-    """
-    Ask Groq to allocate a monthly budget across subcategories.
-    items: list of {id, category_name, subcategory_name, monthly_avg}
-    Returns {id → suggested_amount}.
-    Raises RateLimitError on 429/503, propagates other exceptions.
-    """
+def _build_suggest_prompt(context: dict) -> str:
     items_text = json.dumps(
         [
             {
-                "id": item["id"],
-                "category": item["category_name"],
-                "subcategory": item.get("subcategory_name") or item["category_name"],
-                "monthly_avg": round(float(item["monthly_avg"]), 2),
+                "subcategory_id": it["subcategory_id"],
+                "category": it["category_name"],
+                "subcategory": it["subcategory_name"],
+                "monthly_avg": round(float(it["monthly_avg"]), 2),
+                "historical_max": round(float(it["historical_max"]), 2),
+                "current_cap": round(float(it["current_cap"]), 2),
+                "locked": it["locked"],
             }
-            for item in items
+            for it in context["items"]
         ],
         indent=2,
     )
+    return f"""You are a personal finance budget advisor.
 
-    prompt = f"""You are a personal finance budget advisor.
+Last month's take-home income was ${float(context['last_month_income']):.2f}.
 
-The user wants to allocate ${allocation:.2f}/month across their expense subcategories.
-
-Their average monthly spending per subcategory over the last {months_back} months:
+Below is each expense subcategory with its netted average monthly spending and
+peak monthly spending over the last {context['months_back']} months, its current
+monthly cap (0 = not yet budgeted), and whether it is locked:
 {items_text}
 
-Create a monthly budget:
-- Fixed/necessary expenses (rent, utilities, insurance, debt, car payments, recurring subscriptions, medical) must stay at or very near their historical average — do not cut these
-- Discretionary spending (dining, bars, entertainment, hobbies, shopping, travel, beauty, etc.) should scale proportionally to fit the remaining allocation
-- If historical spending is below the allocation, distribute the surplus proportionally to discretionary categories
-- All amounts must be >= 0
-- The sum of all suggested amounts must equal exactly {allocation:.2f}
+Recommend a monthly cap for EACH subcategory:
+- Fixed/necessary spending (rent, utilities, insurance, debt, subscriptions, medical) should stay at or near its historical average — do not cut these.
+- Discretionary spending (dining, bars, entertainment, shopping, travel, hobbies, beauty) may be trimmed toward a sustainable level so total caps fit within income.
+- LOCKED subcategories must keep their current_cap exactly — do not change them.
+- Every amount must be a positive number and no more than 3× that subcategory's historical_max.
+- Prefer round numbers (multiples of $5).
+- Keep each rationale to one short sentence.
 
-Return ONLY a JSON object mapping each item's "id" to the suggested monthly amount (number):
-{{"id_value_here": 150.00, ...}}
-Include all items. No markdown, no explanation."""
+Respond with raw JSON only in exactly this shape:
+{{"suggestions": [
+  {{"subcategory_id": "<uuid>", "amount": <number>, "rationale": "<one sentence>"}},
+  ...
+]}}
+Include every subcategory. No markdown, no explanation."""
 
-    try:
-        raw = await _call_groq(prompt)
-        raw = _strip_fences(raw)
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return {k: max(0.0, float(v)) for k, v in parsed.items() if isinstance(v, (int, float))}
-        raise ValueError(f"Unexpected budget suggestion response shape: {type(parsed)}")
-    except RateLimitError:
-        raise
-    except Exception:
-        logger.exception("Budget suggestion failed")
-        raise
+
+def _parse_suggest(raw: str) -> dict[str, dict]:
+    """Parse the model's JSON into {subcategory_id: {"amount", "rationale"}}."""
+    parsed = json.loads(_strip_fences(raw))
+    if isinstance(parsed, dict) and isinstance(parsed.get("suggestions"), list):
+        rows = parsed["suggestions"]
+    elif isinstance(parsed, list):
+        rows = parsed
+    else:
+        rows = next((v for v in parsed.values() if isinstance(v, list)), []) if isinstance(parsed, dict) else []
+    out: dict[str, dict] = {}
+    for r in rows:
+        if isinstance(r, dict) and r.get("subcategory_id") and r.get("amount") is not None:
+            out[str(r["subcategory_id"])] = {
+                "amount": r["amount"],
+                "rationale": (str(r["rationale"]).strip() if r.get("rationale") else None),
+            }
+    return out
+
+
+async def suggest_budget_v2(context: dict) -> tuple[dict[str, dict], str]:
+    """History-driven budget suggestion (FR-5). Single-shot Groq → Gemini with no
+    retry ladder (the caller wraps this in a short asyncio.wait_for and falls back
+    to a deterministic heuristic). Returns ({subcategory_id: {amount, rationale}},
+    provider). Raises if both providers fail."""
+    prompt = _build_suggest_prompt(context)
+
+    if _groq:
+        try:
+            resp = await _groq.chat.completions.create(
+                model=_GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+            parsed = _parse_suggest(resp.choices[0].message.content.strip())
+            if parsed:
+                return parsed, "groq"
+            logger.warning("Budget suggestion (Groq) returned no usable rows")
+        except Exception:
+            logger.exception("Budget suggestion via Groq failed — falling back to Gemini")
+
+    resp = await _gemini.aio.models.generate_content(model=_GEMINI_MODEL, contents=prompt)
+    return _parse_suggest(resp.text.strip()), "gemini"
 
 
 async def suggest_categories(

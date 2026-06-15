@@ -103,25 +103,47 @@ class ExclusionRuleOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# AI suggestions — legacy shape, replaced in the suggestions-v2 chunk
+# AI suggestions v2 (FR-5) — history-driven, no allocation input
 # ---------------------------------------------------------------------------
 
-class BudgetSuggestRequest(BaseModel):
-    allocation: Decimal
-    months_back: int = 3
-
-
 class BudgetSuggestionItem(BaseModel):
-    id: str
-    subcategory_id: uuid.UUID | None
-    subcategory_name: str | None
+    subcategory_id: uuid.UUID
+    subcategory_name: str
     category_id: uuid.UUID
     category_name: str
-    monthly_avg: Decimal
-    suggested_amount: Decimal
+    current_cap: Decimal              # 0 when not currently budgeted
+    suggested_amount: Decimal         # $5 multiple, ≤3× historical max
+    locked: bool                      # locked rows are returned unchanged
+    saved_balance: Decimal
+    monthly_avg: Decimal              # netted trailing average (supporting stat)
+    historical_max: Decimal           # max netted monthly spend in the window
+    is_currently_budgeted: bool
+    is_unbudgeted_candidate: bool     # unbudgeted but has real history (FR-5.8)
+    rationale: str | None = None
 
 
 class BudgetSuggestResponse(BaseModel):
+    source: Literal["ai", "heuristic"]
+    provider: str | None = None       # "groq" | "gemini" | None (heuristic)
+    month: int
+    year: int
+    months_analyzed: int
+    last_month_income: Decimal
+    total_suggested: Decimal          # locked caps + suggested for the rest
+    total_locked: Decimal
     suggestions: list[BudgetSuggestionItem]
-    total_suggested: Decimal
-    allocation: Decimal
+
+
+class ApplySuggestionItem(BaseModel):
+    subcategory_id: uuid.UUID
+    amount: Decimal = Field(gt=0)
+
+
+class ApplySuggestionsRequest(BaseModel):
+    month: int = Field(ge=1, le=12)
+    year: int = Field(ge=2000, le=2100)
+    items: list[ApplySuggestionItem]
+
+
+class ApplySuggestionsResponse(BaseModel):
+    applied: int

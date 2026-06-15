@@ -1,21 +1,16 @@
 import uuid
-from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
 from app.middleware.auth import require_auth
-from app.models.category import Category
-from app.models.transaction import Transaction
 from app.schemas.budget import (
+    ApplySuggestionsRequest,
+    ApplySuggestionsResponse,
     BudgetDashboardResponse,
-    BudgetSuggestRequest,
     BudgetSuggestResponse,
-    BudgetSuggestionItem,
     CapUpdate,
     ExclusionRuleCreate,
     ExclusionRuleOut,
@@ -23,8 +18,9 @@ from app.schemas.budget import (
     SavedBalanceOut,
     SavedBalanceReset,
 )
-from app.services import ai_service, budget_lifecycle
+from app.services import budget_lifecycle
 from app.services.budget_service import (
+    apply_suggestions,
     create_exclusion_rule,
     delete_exclusion_rule,
     get_budget_dashboard,
@@ -34,6 +30,7 @@ from app.services.budget_service import (
     reset_saved_balance,
     set_subcategory_cap,
     set_subcategory_lock,
+    suggest_budget_v2,
 )
 
 router = APIRouter(prefix="/budgets", tags=["budgets"])
@@ -127,148 +124,34 @@ async def delete_exclusion_rule_endpoint(
 
 
 # ---------------------------------------------------------------------------
-# AI suggestion — legacy allocation-based shape, replaced in suggestions v2
+# AI suggestions v2 (FR-5)
 # ---------------------------------------------------------------------------
 
 @router.post("/suggest", response_model=BudgetSuggestResponse)
 async def suggest_budget_endpoint(
-    body: BudgetSuggestRequest,
+    month: int = _MONTH,
+    year: int = _YEAR,
+    months_back: int = Query(6, ge=3, le=6),
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
 ) -> BudgetSuggestResponse:
-    """
-    Use Groq to suggest a monthly budget across all non-excluded subcategories.
-    Computes historical averages over the last months_back complete months,
-    then asks Groq to allocate the given total across them.
-    """
-    months_back = max(1, min(12, body.months_back))
+    """History-driven cap suggestions (no allocation input). Uses AI with a
+    deterministic heuristic fallback; the response labels which was used."""
+    return await suggest_budget_v2(db, month=month, year=year, months_back=months_back)
 
-    cat_result = await db.execute(
-        select(Category)
-        .where(Category.is_active == True, Category.budget_excluded == False)  # noqa: E712
-        .options(selectinload(Category.subcategories))
-    )
-    categories = cat_result.scalars().all()
-    if not categories:
-        return BudgetSuggestResponse(
-            suggestions=[], total_suggested=Decimal("0"), allocation=body.allocation
-        )
 
-    # Date range: last months_back complete calendar months
-    today = date.today()
-    y, m = today.year, today.month
-    m -= months_back
-    while m <= 0:
-        m += 12
-        y -= 1
-    start_date = date(y, m, 1)
-    end_date = date(today.year, today.month, 1)
-
-    cat_ids = [c.id for c in categories]
-    # Netted spend (refunds reduce it, FR-4.1), excluding flagged transactions
-    # (FR-4.2 / FR-5.2)
-    spending_result = await db.execute(
-        select(
-            Transaction.subcategory_id,
-            Transaction.category_id,
-            func.sum(Transaction.amount).label("total"),
-        )
-        .where(
-            and_(
-                Transaction.budget_excluded == False,  # noqa: E712
-                Transaction.category_id.in_(cat_ids),
-                Transaction.transaction_date >= start_date,
-                Transaction.transaction_date < end_date,
-            )
-        )
-        .group_by(Transaction.subcategory_id, Transaction.category_id)
-    )
-    spending_rows = spending_result.all()
-
-    sub_spending: dict[uuid.UUID, Decimal] = {}
-    cat_spending: dict[uuid.UUID, Decimal] = {}
-    for row in spending_rows:
-        total = Decimal(str(row.total or 0))
-        if row.subcategory_id:
-            sub_spending[row.subcategory_id] = total
-        else:
-            cat_spending[row.category_id] = cat_spending.get(row.category_id, Decimal("0")) + total
-
-    mb = Decimal(str(months_back))
-
-    ai_items: list[dict] = []
-    for cat in categories:
-        active_subs = [s for s in cat.subcategories if s.is_active]
-        if active_subs:
-            for sub in active_subs:
-                avg = (sub_spending.get(sub.id, Decimal("0")) / mb).quantize(Decimal("0.01"))
-                ai_items.append({
-                    "id": str(sub.id),
-                    "subcategory_id": sub.id,
-                    "subcategory_name": sub.name,
-                    "category_id": cat.id,
-                    "category_name": cat.name,
-                    "monthly_avg": avg,
-                })
-        else:
-            avg = (cat_spending.get(cat.id, Decimal("0")) / mb).quantize(Decimal("0.01"))
-            ai_items.append({
-                "id": str(cat.id),
-                "subcategory_id": None,
-                "subcategory_name": None,
-                "category_id": cat.id,
-                "category_name": cat.name,
-                "monthly_avg": avg,
-            })
-
-    if not ai_items:
-        return BudgetSuggestResponse(
-            suggestions=[], total_suggested=Decimal("0"), allocation=body.allocation
-        )
-
-    try:
-        raw = await ai_service.suggest_budget(ai_items, float(body.allocation), months_back)
-    except ai_service.RateLimitError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI service temporarily unavailable — please retry.",
-        ) from exc
-
-    # Normalize Groq output to sum exactly to allocation (guards against rounding drift)
-    total_raw = sum(raw.values())
-    if total_raw > 0:
-        factor = float(body.allocation) / total_raw
-        normalized = {k: v * factor for k, v in raw.items()}
-    else:
-        share = float(body.allocation) / len(ai_items)
-        normalized = {item["id"]: share for item in ai_items}
-
-    rounded: dict[str, Decimal] = {
-        k: Decimal(str(round(v, 2))) for k, v in normalized.items()
-    }
-    diff = body.allocation - sum(rounded.values())
-    if diff and rounded:
-        last_key = list(rounded)[-1]
-        rounded[last_key] = max(Decimal("0"), rounded[last_key] + diff)
-
-    suggestions = [
-        BudgetSuggestionItem(
-            id=item["id"],
-            subcategory_id=item["subcategory_id"],
-            subcategory_name=item["subcategory_name"],
-            category_id=item["category_id"],
-            category_name=item["category_name"],
-            monthly_avg=item["monthly_avg"],
-            suggested_amount=rounded.get(item["id"], Decimal("0")),
-        )
-        for item in ai_items
-    ]
-
-    return BudgetSuggestResponse(
-        suggestions=suggestions,
-        total_suggested=sum(s.suggested_amount for s in suggestions),
-        allocation=body.allocation,
-    )
+@router.post("/apply-suggestions", response_model=ApplySuggestionsResponse)
+async def apply_suggestions_endpoint(
+    body: ApplySuggestionsRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> ApplySuggestionsResponse:
+    """Bulk-apply accepted suggestions as caps (replaces N sequential PUTs)."""
+    _guard_closed_month(body.month, body.year)
+    await budget_lifecycle.ensure_month(db, body.month, body.year)
+    applied = await apply_suggestions(db, body.month, body.year, body.items)
+    await db.commit()
+    return ApplySuggestionsResponse(applied=applied)
 
 
 # ---------------------------------------------------------------------------

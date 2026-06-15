@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Check, ChevronDown, ChevronRight, Loader2, Lock, LockOpen,
@@ -8,7 +8,7 @@ import MonthSwitcher from '../components/MonthSwitcher'
 import { useBudget } from '../hooks/useBudget'
 import { useAppStore } from '../store/appStore'
 import { formatCurrency } from '../utils/currency'
-import { suggestBudget } from '../services/budgetService'
+import { suggestBudget, applySuggestions } from '../services/budgetService'
 
 // ── Editable amount cell ────────────────────────────────────────────────────
 
@@ -314,111 +314,105 @@ function UnbudgetedSection({ unbudgeted, isClosed, onAdd }) {
   )
 }
 
-// ── Auto-suggest modal (legacy allocation flow — replaced in suggestions v2) ─
+// ── AI suggestion review modal (v2 — history-driven, no allocation) ──────────
 
-function AutoSuggestModal({ defaultAllocation, onApply, onClose }) {
-  const [allocation, setAllocation] = useState(String(Math.round(defaultAllocation || 0)))
-  const [monthsBack, setMonthsBack] = useState(3)
-  const [suggestions, setSuggestions] = useState(null)
-  const [draftAmounts, setDraftAmounts] = useState({})
-  const [loading, setLoading] = useState(false)
+function AutoSuggestModal({ month, year, onClose, onApplied }) {
+  const [data, setData] = useState(null)
+  const [drafts, setDrafts] = useState({})
+  const [selected, setSelected] = useState(() => new Set())
+  const [loading, setLoading] = useState(true)
   const [applying, setApplying] = useState(false)
   const [error, setError] = useState(null)
 
-  const handleGenerate = async () => {
-    const alloc = parseFloat(allocation)
-    if (!alloc || alloc <= 0) { setError('Enter a valid allocation amount.'); return }
-    setError(null)
-    setLoading(true)
-    try {
-      const data = await suggestBudget(alloc, monthsBack)
-      // Only subcategory-level items apply under envelope budgeting (FR-1.3)
-      const items = data.suggestions.filter((s) => s.subcategory_id)
-      setSuggestions(items)
-      const drafts = {}
-      for (const s of items) drafts[s.id] = String(parseFloat(s.suggested_amount).toFixed(2))
-      setDraftAmounts(drafts)
-    } catch (err) {
-      setError(err.response?.data?.detail || err.message || 'Failed to generate suggestions.')
-    } finally {
-      setLoading(false)
+  useEffect(() => {
+    let cancelled = false
+    const run = async () => {
+      setLoading(true)
+      setError(null)
+      try {
+        const resp = await suggestBudget(month, year)
+        if (cancelled) return
+        const d = {}
+        const sel = new Set()
+        for (const s of resp.suggestions) {
+          d[s.subcategory_id] = String(parseFloat(s.suggested_amount))
+          if (!s.locked) sel.add(s.subcategory_id)
+        }
+        setData(resp)
+        setDrafts(d)
+        setSelected(sel)
+      } catch (err) {
+        if (!cancelled) setError(err.response?.data?.detail || err.message || 'Failed to generate suggestions.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
     }
+    run()
+    return () => { cancelled = true }
+  }, [month, year])
+
+  const toggleSelected = (id) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
   }
 
-  const totalDraft = suggestions
-    ? suggestions.reduce((sum, s) => sum + (parseFloat(draftAmounts[s.id]) || 0), 0)
-    : 0
+  const income = parseFloat(data?.last_month_income) || 0
+
+  // Projected total = locked caps + selected (edited) suggestions + unselected
+  // rows left at their current cap.
+  const projected = (data?.suggestions ?? []).reduce((sum, s) => {
+    if (s.locked) return sum + (parseFloat(s.current_cap) || 0)
+    if (selected.has(s.subcategory_id)) return sum + (parseFloat(drafts[s.subcategory_id]) || 0)
+    return sum + (parseFloat(s.current_cap) || 0)
+  }, 0)
+  const overIncome = income > 0 && projected > income
 
   const handleApply = async () => {
-    if (!suggestions) return
+    const items = (data?.suggestions ?? [])
+      .filter((s) => !s.locked && selected.has(s.subcategory_id) && (parseFloat(drafts[s.subcategory_id]) || 0) > 0)
+      .map((s) => ({ subcategory_id: s.subcategory_id, amount: parseFloat(drafts[s.subcategory_id]) }))
+    if (items.length === 0) { onClose(); return }
     setApplying(true)
+    setError(null)
     try {
-      await onApply(suggestions
-        .filter((s) => (parseFloat(draftAmounts[s.id]) || 0) > 0)
-        .map((s) => ({
-          subcategory_id: s.subcategory_id,
-          amount: parseFloat(draftAmounts[s.id]),
-        })))
+      await applySuggestions(month, year, items)
+      await onApplied?.()
       onClose()
     } catch (err) {
-      setError(err.message || 'Failed to apply budgets.')
+      setError(err.response?.data?.detail || err.message || 'Failed to apply budgets.')
     } finally {
       setApplying(false)
     }
   }
 
-  const grouped = suggestions
-    ? suggestions.reduce((acc, s) => {
-        const key = s.category_id
-        if (!acc[key]) acc[key] = { category_name: s.category_name, items: [] }
-        acc[key].items.push(s)
-        return acc
-      }, {})
-    : null
+  const grouped = (data?.suggestions ?? []).reduce((acc, s) => {
+    if (!acc[s.category_id]) acc[s.category_id] = { category_name: s.category_name, items: [] }
+    acc[s.category_id].items.push(s)
+    return acc
+  }, {})
+
+  const selectedCount = (data?.suggestions ?? []).filter(
+    (s) => !s.locked && selected.has(s.subcategory_id)
+  ).length
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
           <div className="flex items-center gap-2">
             <Sparkles size={18} className="text-indigo-500" />
-            <h2 className="font-semibold text-slate-800 text-base">AI Budget Suggestion</h2>
+            <h2 className="font-semibold text-slate-800 text-base">Suggested Budget</h2>
+            {data && (
+              <span className={`text-xs px-2 py-0.5 rounded-full ${data.source === 'ai' ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
+                {data.source === 'ai' ? `AI · ${data.provider}` : 'Estimated (non-AI)'}
+              </span>
+            )}
           </div>
           <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors">
             <X size={18} />
-          </button>
-        </div>
-
-        <div className="px-6 py-4 border-b border-slate-100 flex flex-wrap items-end gap-4">
-          <div>
-            <label className="label text-xs">Monthly allocation ($)</label>
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              className="input w-36 py-1.5 text-sm"
-              value={allocation}
-              onChange={(e) => setAllocation(e.target.value)}
-            />
-          </div>
-          <div>
-            <label className="label text-xs">Months of history</label>
-            <select
-              className="input py-1.5 text-sm"
-              value={monthsBack}
-              onChange={(e) => setMonthsBack(Number(e.target.value))}
-            >
-              {[1,2,3,4,5,6].map((n) => (
-                <option key={n} value={n}>{n} month{n !== 1 ? 's' : ''}</option>
-              ))}
-            </select>
-          </div>
-          <button
-            onClick={handleGenerate}
-            disabled={loading}
-            className="btn-primary py-1.5 text-sm flex items-center gap-1.5"
-          >
-            {loading ? <><Loader2 size={14} className="animate-spin" /> Generating…</> : <><Sparkles size={14} /> Generate</>}
           </button>
         </div>
 
@@ -428,13 +422,23 @@ function AutoSuggestModal({ defaultAllocation, onApply, onClose }) {
           </div>
         )}
 
-        {grouped && (
+        {loading ? (
+          <div className="flex-1 flex items-center justify-center py-16 text-slate-400 text-sm gap-2">
+            <Loader2 size={16} className="animate-spin" /> Analyzing {data?.months_analyzed ?? 'recent'} months of history…
+          </div>
+        ) : (data?.suggestions ?? []).length === 0 ? (
+          <div className="flex-1 flex items-center justify-center py-16 text-slate-400 text-sm">
+            Not enough history to suggest a budget yet.
+          </div>
+        ) : (
           <div className="flex-1 overflow-y-auto px-6 py-4">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left">
+                  <th className="pb-2 w-8" />
                   <th className="pb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide">Subcategory</th>
-                  <th className="pb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide text-right pr-4">Avg/mo</th>
+                  <th className="pb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide text-right pr-3">Avg · Max</th>
+                  <th className="pb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide text-right pr-3">Current</th>
                   <th className="pb-2 text-xs font-semibold text-slate-500 uppercase tracking-wide text-right">Suggested</th>
                 </tr>
               </thead>
@@ -442,28 +446,62 @@ function AutoSuggestModal({ defaultAllocation, onApply, onClose }) {
                 {Object.values(grouped).map((group) => (
                   <>
                     <tr key={group.category_name} className="bg-slate-50">
-                      <td colSpan={3} className="py-1.5 px-1 text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                      <td colSpan={5} className="py-1.5 px-1 text-xs font-semibold text-slate-600 uppercase tracking-wide">
                         {group.category_name}
                       </td>
                     </tr>
-                    {group.items.map((s) => (
-                      <tr key={s.id} className="hover:bg-slate-50">
-                        <td className="py-2 pl-3 text-slate-700">{s.subcategory_name}</td>
-                        <td className="py-2 pr-4 text-right text-slate-400 tabular-nums">
-                          {formatCurrency(parseFloat(s.monthly_avg))}
-                        </td>
-                        <td className="py-2 text-right">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            className="input w-24 py-0.5 text-sm text-right tabular-nums"
-                            value={draftAmounts[s.id] ?? ''}
-                            onChange={(e) => setDraftAmounts((prev) => ({ ...prev, [s.id]: e.target.value }))}
-                          />
-                        </td>
-                      </tr>
-                    ))}
+                    {group.items.map((s) => {
+                      const isSel = selected.has(s.subcategory_id)
+                      return (
+                        <tr key={s.subcategory_id} className={`hover:bg-slate-50 ${s.locked ? 'opacity-70' : ''}`}>
+                          <td className="py-2 pl-1">
+                            <input
+                              type="checkbox"
+                              className="w-3.5 h-3.5 rounded accent-indigo-600"
+                              checked={!s.locked && isSel}
+                              disabled={s.locked}
+                              onChange={() => toggleSelected(s.subcategory_id)}
+                            />
+                          </td>
+                          <td className="py-2 text-slate-700">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {s.subcategory_name}
+                              {s.locked && (
+                                <span className="inline-flex items-center gap-0.5 text-[11px] text-indigo-600">
+                                  <Lock size={11} /> locked
+                                </span>
+                              )}
+                              {s.is_unbudgeted_candidate && (
+                                <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">New</span>
+                              )}
+                            </div>
+                            {s.rationale && (
+                              <p className="text-[11px] text-slate-400 mt-0.5">{s.rationale}</p>
+                            )}
+                          </td>
+                          <td className="py-2 pr-3 text-right text-slate-400 tabular-nums whitespace-nowrap">
+                            {formatCurrency(parseFloat(s.monthly_avg))} · {formatCurrency(parseFloat(s.historical_max))}
+                          </td>
+                          <td className="py-2 pr-3 text-right text-slate-500 tabular-nums">
+                            {parseFloat(s.current_cap) > 0 ? formatCurrency(parseFloat(s.current_cap)) : '—'}
+                          </td>
+                          <td className="py-2 text-right">
+                            {s.locked ? (
+                              <span className="tabular-nums text-slate-500 pr-1">{formatCurrency(parseFloat(s.current_cap))}</span>
+                            ) : (
+                              <input
+                                type="number"
+                                min="0"
+                                step="5"
+                                className="input w-24 py-0.5 text-sm text-right tabular-nums"
+                                value={drafts[s.subcategory_id] ?? ''}
+                                onChange={(e) => setDrafts((prev) => ({ ...prev, [s.subcategory_id]: e.target.value }))}
+                              />
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </>
                 ))}
               </tbody>
@@ -471,20 +509,31 @@ function AutoSuggestModal({ defaultAllocation, onApply, onClose }) {
           </div>
         )}
 
-        {grouped && (
-          <div className="px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-4">
-            <div className="text-sm">
-              <span className="text-slate-600">Total: </span>
-              <span className="font-semibold text-slate-800 tabular-nums">{formatCurrency(totalDraft)}</span>
+        {!loading && (data?.suggestions ?? []).length > 0 && (
+          <div className="px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-4 flex-wrap">
+            <div className="text-sm space-y-0.5">
+              <div>
+                <span className="text-slate-600">Projected total: </span>
+                <span className={`font-semibold tabular-nums ${overIncome ? 'text-red-600' : 'text-slate-800'}`}>
+                  {formatCurrency(projected)}
+                </span>
+              </div>
+              {income > 0 && (
+                <div className={`text-xs ${overIncome ? 'text-red-600' : 'text-emerald-600'}`}>
+                  {overIncome
+                    ? `${formatCurrency(projected - income)} over last month's income (${formatCurrency(income)})`
+                    : `Within last month's income (${formatCurrency(income)})`}
+                </div>
+              )}
             </div>
             <div className="flex gap-2">
               <button onClick={onClose} className="btn-secondary text-sm">Cancel</button>
               <button
                 onClick={handleApply}
-                disabled={applying}
+                disabled={applying || selectedCount === 0}
                 className="btn-primary text-sm flex items-center gap-1.5"
               >
-                {applying ? <><Loader2 size={14} className="animate-spin" /> Applying…</> : <><Check size={14} /> Apply All</>}
+                {applying ? <><Loader2 size={14} className="animate-spin" /> Applying…</> : <><Check size={14} /> Apply {selectedCount} selected</>}
               </button>
             </div>
           </div>
@@ -506,6 +555,7 @@ export default function Budgets() {
     saveCap,
     toggleLock,
     removeBudget,
+    refetch,
     selectedMonth,
     selectedYear,
   } = useBudget()
@@ -533,12 +583,6 @@ export default function Budgets() {
     if (!window.confirm(msg)) return
     await removeBudget(subcategoryId)
   })
-
-  const handleApplySuggestions = async (items) => {
-    for (const item of items) {
-      await saveCap(item.subcategory_id, item.amount)
-    }
-  }
 
   // Drill-down: open the Transactions page pre-filtered to this subcategory for
   // the selected month (date_to is inclusive on the backend).
@@ -679,9 +723,10 @@ export default function Budgets() {
 
       {suggestOpen && (
         <AutoSuggestModal
-          defaultAllocation={parseFloat(summary?.total_budgeted) || 0}
-          onApply={handleApplySuggestions}
+          month={selectedMonth}
+          year={selectedYear}
           onClose={() => setSuggestOpen(false)}
+          onApplied={refetch}
         />
       )}
     </div>

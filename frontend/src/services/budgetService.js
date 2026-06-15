@@ -64,10 +64,14 @@ export const deleteExclusionRule = async (ruleId) => {
   await api.delete(`/api/budgets/exclusion-rules/${ruleId}`)
 }
 
-export const suggestBudget = async (allocation, monthsBack = 3) => {
-  const { data } = await api.post('/api/budgets/suggest', {
-    allocation,
-    months_back: monthsBack,
+export const suggestBudget = async (month, year, monthsBack = 6) => {
+  const { data } = await api.post('/api/budgets/suggest', null, {
+    params: { month, year, months_back: monthsBack },
   })
+  return data
+}
+
+export const applySuggestions = async (month, year, items) => {
+  const { data } = await api.post('/api/budgets/apply-suggestions', { month, year, items })
   return data
 }
