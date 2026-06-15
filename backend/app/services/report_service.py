@@ -18,7 +18,8 @@ from app.schemas.report import (
     DashboardResponse,
     DashboardSubcategoryRow,
     DashboardSummary,
-    DashboardUnbudgetedRow,
+    DashboardSystemCategoryRow,
+    DashboardSystemSubcategoryRow,
     TopMerchantRow,
     TrendPoint,
     TrendResponse,
@@ -212,28 +213,58 @@ async def get_dashboard(
             )
         )
 
-    # ── Unbudgeted spending: subcategories with spend but no cap this month ──
-    unbudgeted_spending: list[DashboardUnbudgetedRow] = []
-    total_unbudgeted_spent = Decimal("0")
-    for cat in budgeted_categories:
-        for sub in cat.subcategories:
-            if not sub.is_active or sub.id in subcat_budget_map:
+    # ── System categories: budget-excluded categories (Income, Investments, …) ──
+    excluded_categories = [c for c in categories if c.budget_excluded]
+    system_categories: list[DashboardSystemCategoryRow] = []
+    if excluded_categories:
+        sys_result = await db.execute(
+            select(
+                Transaction.category_id,
+                Transaction.subcategory_id,
+                func.sum(Transaction.amount).label("total"),
+            )
+            .where(
+                and_(
+                    Transaction.transaction_date >= start_date,
+                    Transaction.transaction_date <= end_date,
+                    Transaction.category_id.in_([c.id for c in excluded_categories]),
+                )
+            )
+            .group_by(Transaction.category_id, Transaction.subcategory_id)
+        )
+        by_cat: dict[uuid.UUID, dict] = {}
+        for row in sys_result.all():
+            amt = Decimal(str(row.total or 0))
+            entry = by_cat.setdefault(row.category_id, {"total": Decimal("0"), "subs": {}})
+            entry["total"] += amt
+            if row.subcategory_id:
+                entry["subs"][row.subcategory_id] = entry["subs"].get(row.subcategory_id, Decimal("0")) + amt
+
+        for cat in excluded_categories:
+            entry = by_cat.get(cat.id)
+            if not entry or abs(entry["total"]) == 0:
                 continue
-            sub_spent = subcat_spend_map.get(sub.id, Decimal("0"))
-            if sub_spent <= 0:
-                continue
-            unbudgeted_spending.append(
-                DashboardUnbudgetedRow(
+            sub_names = {s.id: s.name for s in cat.subcategories}
+            sub_rows = [
+                DashboardSystemSubcategoryRow(
+                    subcategory_id=str(sid),
+                    subcategory_name=sub_names.get(sid, "—"),
+                    amount=abs(amt),
+                )
+                for sid, amt in entry["subs"].items()
+                if abs(amt) > 0
+            ]
+            sub_rows.sort(key=lambda r: r.amount, reverse=True)
+            system_categories.append(
+                DashboardSystemCategoryRow(
                     category_id=str(cat.id),
                     category_name=cat.name,
                     category_color=cat.color,
-                    subcategory_id=str(sub.id),
-                    subcategory_name=sub.name,
-                    spent=sub_spent,
+                    amount=abs(entry["total"]),
+                    subcategories=sub_rows,
                 )
             )
-            total_unbudgeted_spent += sub_spent
-    unbudgeted_spending.sort(key=lambda r: r.spent, reverse=True)
+        system_categories.sort(key=lambda r: r.amount, reverse=True)
 
     return DashboardResponse(
         month=month,
@@ -242,8 +273,7 @@ async def get_dashboard(
         rows=rows,
         total_budget=total_budget,
         total_spent=total_spent,
-        unbudgeted_spending=unbudgeted_spending,
-        total_unbudgeted_spent=total_unbudgeted_spent,
+        system_categories=system_categories,
     )
 
 

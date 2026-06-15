@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Fragment } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useAppStore } from '../store/appStore'
@@ -275,52 +275,53 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Unbudgeted spending */}
-      {!loading && (data?.unbudgeted_spending?.length > 0) && (
+      {/* System categories (excluded from budgeting) */}
+      {!loading && (data?.system_categories?.length > 0) && (
         <div className="card p-0 overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-base font-semibold text-slate-700">Unbudgeted spending</h2>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Spending this month in subcategories with no budget cap
-              </p>
-            </div>
-            <span className="text-sm font-semibold text-amber-600 tabular-nums whitespace-nowrap">
-              {formatCurrency(data.total_unbudgeted_spent)}
-            </span>
+          <div className="px-6 py-4 border-b border-slate-200">
+            <h2 className="text-base font-semibold text-slate-700">System Categories</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Activity this month in categories excluded from budgeting
+            </p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200">
                   <th className="table-header">Category</th>
-                  <th className="table-header">Subcategory</th>
-                  <th className="table-header text-right">Spent</th>
+                  <th className="table-header text-right">Amount</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {data.unbudgeted_spending.map((row) => (
-                  <tr key={row.subcategory_id} className="hover:bg-slate-50">
-                    <td className="table-cell">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className="w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: row.category_color || '#94a3b8' }}
-                        />
-                        <span className="text-slate-600">{row.category_name}</span>
-                      </div>
-                    </td>
-                    <td className="table-cell">
-                      <button
-                        onClick={() => drillToTransactions(row.category_id, row.subcategory_id)}
-                        className="text-left text-slate-700 hover:text-indigo-600 hover:underline transition-colors"
-                        title="View this subcategory's transactions for this month"
-                      >
-                        {row.subcategory_name}
-                      </button>
-                    </td>
-                    <td className="table-cell text-right tabular-nums font-medium">{formatCurrency(row.spent)}</td>
-                  </tr>
+                {data.system_categories.map((cat) => (
+                  <Fragment key={cat.category_id}>
+                    <tr className="bg-slate-50/60">
+                      <td className="table-cell">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="w-2.5 h-2.5 rounded-full shrink-0"
+                            style={{ backgroundColor: cat.category_color || '#94a3b8' }}
+                          />
+                          <span className="font-semibold text-slate-700">{cat.category_name}</span>
+                        </div>
+                      </td>
+                      <td className="table-cell text-right tabular-nums font-semibold">{formatCurrency(cat.amount)}</td>
+                    </tr>
+                    {cat.subcategories.map((sub) => (
+                      <tr key={sub.subcategory_id} className="hover:bg-slate-50">
+                        <td className="table-cell">
+                          <button
+                            onClick={() => drillToTransactions(cat.category_id, sub.subcategory_id)}
+                            className="text-left text-slate-600 hover:text-indigo-600 hover:underline transition-colors pl-6"
+                            title="View this subcategory's transactions for this month"
+                          >
+                            {sub.subcategory_name}
+                          </button>
+                        </td>
+                        <td className="table-cell text-right tabular-nums text-slate-600">{formatCurrency(sub.amount)}</td>
+                      </tr>
+                    ))}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

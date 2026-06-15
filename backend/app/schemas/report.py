@@ -34,13 +34,19 @@ class DashboardCategoryRow(BaseModel):
     subcategories: list[DashboardSubcategoryRow] = []
 
 
-class DashboardUnbudgetedRow(BaseModel):
+class DashboardSystemSubcategoryRow(BaseModel):
+    subcategory_id: str
+    subcategory_name: str
+    amount: Decimal  # |net| activity this month
+
+
+class DashboardSystemCategoryRow(BaseModel):
+    """A budget-excluded ("system") category — e.g. Income, Investments."""
     category_id: str
     category_name: str
     category_color: str
-    subcategory_id: str
-    subcategory_name: str
-    spent: Decimal  # netted spend this month in a subcategory with no cap
+    amount: Decimal  # |net| activity this month
+    subcategories: list[DashboardSystemSubcategoryRow] = []
 
 
 class DashboardResponse(BaseModel):
@@ -50,8 +56,7 @@ class DashboardResponse(BaseModel):
     rows: list[DashboardCategoryRow]
     total_budget: Decimal
     total_spent: Decimal
-    unbudgeted_spending: list[DashboardUnbudgetedRow] = []
-    total_unbudgeted_spent: Decimal = Decimal("0")
+    system_categories: list[DashboardSystemCategoryRow] = []
 
 
 class TrendPoint(BaseModel):
