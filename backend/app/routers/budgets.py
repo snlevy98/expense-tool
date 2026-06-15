@@ -1,4 +1,5 @@
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,6 +11,7 @@ from app.schemas.budget import (
     ApplySuggestionsRequest,
     ApplySuggestionsResponse,
     BudgetDashboardResponse,
+    BudgetHistoryResponse,
     BudgetSuggestResponse,
     CapUpdate,
     ExclusionRuleCreate,
@@ -18,12 +20,13 @@ from app.schemas.budget import (
     SavedBalanceOut,
     SavedBalanceReset,
 )
-from app.services import budget_lifecycle
+from app.services import budget_lifecycle, budget_math
 from app.services.budget_service import (
     apply_suggestions,
     create_exclusion_rule,
     delete_exclusion_rule,
     get_budget_dashboard,
+    get_budget_history,
     list_exclusion_rules,
     list_saved_balances,
     remove_subcategory_budget,
@@ -152,6 +155,57 @@ async def apply_suggestions_endpoint(
     applied = await apply_suggestions(db, body.month, body.year, body.items)
     await db.commit()
     return ApplySuggestionsResponse(applied=applied)
+
+
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+
+def _parse_ym(value: str) -> tuple[int, int]:
+    """Parse a 'YYYY-MM' string into (year, month)."""
+    try:
+        y, m = value.split("-")
+        year, month = int(y), int(m)
+        if not (1 <= month <= 12):
+            raise ValueError
+        return year, month
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid month '{value}' — expected YYYY-MM.",
+        ) from exc
+
+
+@router.get("/history", response_model=BudgetHistoryResponse)
+async def budget_history_endpoint(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None, alias="to"),
+    category_id: uuid.UUID | None = None,
+    subcategory_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> BudgetHistoryResponse:
+    """Budget vs. actual per month over [from, to] (defaults to the trailing
+    6 months ending this month), optionally scoped to a category/subcategory."""
+    today = date.today()
+    to_year, to_month = _parse_ym(to) if to else (today.year, today.month)
+    if from_:
+        from_year, from_month = _parse_ym(from_)
+    else:
+        fm, fy = to_month, to_year
+        for _ in range(5):  # 6 months inclusive
+            fm, fy = budget_math.prev_month(fm, fy)
+        from_year, from_month = fy, fm
+
+    if (from_year, from_month) > (to_year, to_month):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="'from' must be on or before 'to'.",
+        )
+
+    return await get_budget_history(
+        db, from_month, from_year, to_month, to_year, category_id, subcategory_id
+    )
 
 
 # ---------------------------------------------------------------------------

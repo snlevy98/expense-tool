@@ -4,6 +4,7 @@ import {
   CreditCard,
   Upload,
   PiggyBank,
+  History,
   BarChart2,
   Settings,
   LogOut,
@@ -22,6 +23,7 @@ const navItems = [
   { to: '/categorize', icon: Tag, label: 'Categorize', badgeKey: 'uncategorized' },
   { to: '/amazon', icon: ShoppingCart, label: 'Amazon', badgeKey: 'amazon' },
   { to: '/budgets', icon: PiggyBank, label: 'Budgets' },
+  { to: '/budget-history', icon: History, label: 'History' },
   { to: '/reports', icon: BarChart2, label: 'Reports' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ]

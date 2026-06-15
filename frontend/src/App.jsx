@@ -10,6 +10,7 @@ import Import from './pages/Import'
 import Categorize from './pages/Categorize'
 import Amazon from './pages/Amazon'
 import Budgets from './pages/Budgets'
+import BudgetHistory from './pages/BudgetHistory'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 
@@ -106,6 +107,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Budgets />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/budget-history"
+        element={
+          <ProtectedRoute>
+            <BudgetHistory />
           </ProtectedRoute>
         }
       />

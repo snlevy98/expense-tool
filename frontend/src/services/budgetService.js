@@ -75,3 +75,13 @@ export const applySuggestions = async (month, year, items) => {
   const { data } = await api.post('/api/budgets/apply-suggestions', { month, year, items })
   return data
 }
+
+export const getBudgetHistory = async ({ from, to, categoryId, subcategoryId } = {}) => {
+  const params = {}
+  if (from) params.from = from
+  if (to) params.to = to
+  if (categoryId) params.category_id = categoryId
+  if (subcategoryId) params.subcategory_id = subcategoryId
+  const { data } = await api.get('/api/budgets/history', { params })
+  return data
+}

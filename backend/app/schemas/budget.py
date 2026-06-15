@@ -147,3 +147,29 @@ class ApplySuggestionsRequest(BaseModel):
 
 class ApplySuggestionsResponse(BaseModel):
     applied: int
+
+
+# ---------------------------------------------------------------------------
+# History (budget vs. actual over time)
+# ---------------------------------------------------------------------------
+
+class BudgetHistoryPoint(BaseModel):
+    month: int
+    year: int
+    label: str                    # e.g. "Jan 2026"
+    budget: Decimal               # total cap in scope that month
+    spent: Decimal                # netted actual in scope that month
+    surplus: Decimal              # Σ max(0, cap - spent) per subcategory
+    overage: Decimal              # Σ max(0, spent - cap) per subcategory
+    covered_overage: Decimal      # overage drawn from savings (settlement)
+    net_overage: Decimal          # overage - covered
+    saved_balance: Decimal        # scope saved-balance trajectory, end of month
+
+
+class BudgetHistoryResponse(BaseModel):
+    from_month: int
+    from_year: int
+    to_month: int
+    to_year: int
+    scope: Literal["all", "category", "subcategory"]
+    points: list[BudgetHistoryPoint]

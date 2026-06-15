@@ -26,6 +26,8 @@ from app.models.subcategory import Subcategory
 from app.models.transaction import Transaction
 from app.schemas.budget import (
     BudgetDashboardResponse,
+    BudgetHistoryPoint,
+    BudgetHistoryResponse,
     BudgetSuggestionItem,
     BudgetSuggestResponse,
     BudgetSummary,
@@ -694,3 +696,126 @@ async def apply_suggestions(
         if budget is not None:
             applied += 1
     return applied
+
+
+# ---------------------------------------------------------------------------
+# History — budget vs. actual over a month range
+# ---------------------------------------------------------------------------
+
+_MONTH_ABBR = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+async def _scope_subcategory_ids(
+    db: AsyncSession, category_id: uuid.UUID | None, subcategory_id: uuid.UUID | None
+) -> tuple[set[uuid.UUID], str]:
+    if subcategory_id is not None:
+        return {subcategory_id}, "subcategory"
+    if category_id is not None:
+        res = await db.execute(
+            select(Subcategory.id).where(Subcategory.category_id == category_id)
+        )
+        return {r[0] for r in res.all()}, "category"
+    res = await db.execute(
+        select(Subcategory.id)
+        .join(Category, Subcategory.category_id == Category.id)
+        .where(Category.budget_excluded == False)  # noqa: E712
+    )
+    return {r[0] for r in res.all()}, "all"
+
+
+async def get_budget_history(
+    db: AsyncSession,
+    from_month: int,
+    from_year: int,
+    to_month: int,
+    to_year: int,
+    category_id: uuid.UUID | None = None,
+    subcategory_id: uuid.UUID | None = None,
+) -> BudgetHistoryResponse:
+    """Per-month budget vs. actual over [from, to] for the chosen scope, with the
+    covered-vs-net overage split (from settlement events) and the saved-balance
+    trajectory (from event balance_after)."""
+    sub_ids, scope = await _scope_subcategory_ids(db, category_id, subcategory_id)
+
+    # Month list, ascending, inclusive (capped for safety).
+    months: list[tuple[int, int]] = []
+    m, y = from_month, from_year
+    while (y, m) <= (to_year, to_month) and len(months) <= 60:
+        months.append((m, y))
+        m, y = budget_math.next_month(m, y)
+
+    empty = BudgetHistoryResponse(
+        from_month=from_month, from_year=from_year,
+        to_month=to_month, to_year=to_year, scope=scope, points=[],
+    )
+    if not sub_ids or not months:
+        return empty
+
+    # Caps per (year, month, subcategory).
+    bud_res = await db.execute(
+        select(Budget).where(Budget.subcategory_id.in_(sub_ids))
+    )
+    caps: dict[tuple[int, int, uuid.UUID], Decimal] = {
+        (b.year, b.month, b.subcategory_id): Decimal(str(b.amount))
+        for b in bud_res.scalars().all()
+    }
+
+    # Settlement coverage per month + per-subcategory balance trajectory.
+    ev_res = await db.execute(
+        select(SavedBalanceEvent)
+        .where(
+            SavedBalanceEvent.subcategory_id.in_(sub_ids),
+            SavedBalanceEvent.month.isnot(None),
+        )
+        .order_by(SavedBalanceEvent.year, SavedBalanceEvent.month, SavedBalanceEvent.created_at)
+    )
+    covered_by_month: dict[tuple[int, int], Decimal] = defaultdict(lambda: ZERO)
+    per_sub_bal: dict[uuid.UUID, dict[tuple[int, int], Decimal]] = defaultdict(dict)
+    for e in ev_res.scalars().all():
+        if e.reason == SavedBalanceEvent.REASON_COVERAGE:
+            covered_by_month[(e.year, e.month)] += -Decimal(str(e.delta))
+        per_sub_bal[e.subcategory_id][(e.year, e.month)] = Decimal(str(e.balance_after))
+
+    points: list[BudgetHistoryPoint] = []
+    for mm, yy in months:
+        spent_map = await budget_math.get_spent_by_subcategory(db, mm, yy)
+        total_budget = total_spent = surplus = overage = ZERO
+        for sub in sub_ids:
+            cap = caps.get((yy, mm, sub), ZERO)
+            spent = spent_map.get(sub, ZERO)
+            if cap == ZERO and spent == ZERO:
+                continue
+            total_budget += cap
+            total_spent += spent
+            if cap > ZERO:
+                if spent < cap:
+                    surplus += cap - spent
+                elif spent > cap:
+                    overage += spent - cap
+
+        covered = min(covered_by_month.get((yy, mm), ZERO), overage)
+        net = overage - covered
+
+        # Saved balance at end of this month = Σ latest event ≤ (yy, mm) per sub.
+        bal = ZERO
+        for sub in sub_ids:
+            d = per_sub_bal.get(sub)
+            if not d:
+                continue
+            best_key = max((k for k in d if k <= (yy, mm)), default=None)
+            if best_key is not None:
+                bal += d[best_key]
+
+        points.append(BudgetHistoryPoint(
+            month=mm, year=yy, label=f"{_MONTH_ABBR[mm]} {yy}",
+            budget=total_budget, spent=total_spent,
+            surplus=surplus, overage=overage,
+            covered_overage=covered, net_overage=net,
+            saved_balance=bal,
+        ))
+
+    return BudgetHistoryResponse(
+        from_month=from_month, from_year=from_year,
+        to_month=to_month, to_year=to_year, scope=scope, points=points,
+    )
