@@ -43,11 +43,17 @@ _YEAR = Query(..., ge=2000, le=2100)
 
 
 def _guard_closed_month(month: int, year: int) -> None:
-    """Caps and locks in closed months are read-only (FR-2.4)."""
+    """Block actions that would alter a closed month's saved-balance pool.
+
+    Caps and locks ARE editable retroactively (the edit is recorded and shown,
+    but never re-settles or propagates into saved balances). Unbudgeting (which
+    deletes the saved balance) and applying suggestions are still blocked for
+    closed months.
+    """
     if budget_lifecycle.is_closed_month(month, year):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="This month is closed — caps and locks can no longer be edited.",
+            detail="This month is closed — its budget can no longer be removed.",
         )
 
 
@@ -234,7 +240,8 @@ async def set_cap_endpoint(
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
 ) -> dict:
-    _guard_closed_month(month, year)
+    # Caps are editable for closed months too — the change is recorded and shown
+    # but does not re-settle or propagate into saved balances.
     await budget_lifecycle.ensure_month(db, month, year)
     budget = await set_subcategory_cap(db, subcategory_id, month, year, body.amount)
     if budget is None:
@@ -262,7 +269,7 @@ async def set_lock_endpoint(
     db: AsyncSession = Depends(get_db),
     auth: dict = Depends(require_auth),
 ) -> dict:
-    _guard_closed_month(month, year)
+    # Locks are editable for closed months too (no math impact).
     budget = await set_subcategory_lock(db, subcategory_id, month, year, body.locked)
     if budget is None:
         raise HTTPException(

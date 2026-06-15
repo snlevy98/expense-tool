@@ -189,7 +189,6 @@ function CategoryGroup({ group, isClosed, onSaveCap, onToggleLock, onRemove, onD
           <td className="table-cell">
             <AmountCell
               value={parseFloat(sub.cap) || 0}
-              disabled={isClosed}
               onSave={(amount) => onSaveCap(sub.subcategory_id, amount)}
             />
           </td>
@@ -203,7 +202,6 @@ function CategoryGroup({ group, isClosed, onSaveCap, onToggleLock, onRemove, onD
             <div className="flex items-center gap-1">
               <button
                 title={sub.locked ? 'Unlock (AI may adjust)' : 'Lock (AI never adjusts)'}
-                disabled={isClosed}
                 onClick={() => onToggleLock(sub.subcategory_id, !sub.locked)}
                 className={`p-1 rounded transition-colors ${sub.locked ? 'text-indigo-600 hover:bg-indigo-50' : 'text-slate-300 hover:text-slate-500 hover:bg-slate-100'}`}
               >
@@ -227,7 +225,7 @@ function CategoryGroup({ group, isClosed, onSaveCap, onToggleLock, onRemove, onD
 
 // ── Unbudgeted picker ───────────────────────────────────────────────────────
 
-function UnbudgetedSection({ unbudgeted, isClosed, onAdd }) {
+function UnbudgetedSection({ unbudgeted, onAdd }) {
   const [addingId, setAddingId] = useState(null)
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
@@ -298,7 +296,6 @@ function UnbudgetedSection({ unbudgeted, isClosed, onAdd }) {
                 ) : (
                   <button
                     key={s.subcategory_id}
-                    disabled={isClosed}
                     onClick={() => { setAddingId(s.subcategory_id); setDraft('') }}
                     className="inline-flex items-center gap-1 border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50 rounded-full px-3 py-0.5 text-sm text-slate-600 transition-colors disabled:opacity-50"
                   >
@@ -618,7 +615,7 @@ export default function Budgets() {
 
       {isClosed && (
         <div className="p-3 bg-slate-100 border border-slate-200 rounded-lg text-slate-600 text-sm">
-          This month is closed — caps and locks are read-only. Late transactions still update its actuals.
+          This month is closed. You can still edit its caps for an accurate record, but changes here don't affect saved balances or any other month. Budgets can't be removed once closed.
         </div>
       )}
 
@@ -716,7 +713,6 @@ export default function Budgets() {
       {!loading && (
         <UnbudgetedSection
           unbudgeted={data?.unbudgeted}
-          isClosed={isClosed}
           onAdd={wrap(saveCap)}
         />
       )}
