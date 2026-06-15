@@ -1,14 +1,15 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Check, ChevronDown, ChevronRight, Loader2, Lock, LockOpen,
+  Check, ChevronDown, ChevronRight, Copy, Loader2, Lock, LockOpen,
   Pencil, PiggyBank, Plus, Sparkles, Trash2, X,
 } from 'lucide-react'
 import MonthSwitcher from '../components/MonthSwitcher'
 import { useBudget } from '../hooks/useBudget'
 import { useAppStore } from '../store/appStore'
 import { formatCurrency } from '../utils/currency'
-import { suggestBudget, applySuggestions } from '../services/budgetService'
+import { getMonthName } from '../utils/date'
+import { suggestBudget, applySuggestions, copyBudgets } from '../services/budgetService'
 
 // ── Editable amount cell ────────────────────────────────────────────────────
 
@@ -311,6 +312,90 @@ function UnbudgetedSection({ unbudgeted, onAdd }) {
   )
 }
 
+// ── Copy-from-another-month modal ────────────────────────────────────────────
+
+function CopyFromModal({ targetMonth, targetYear, onClose, onCopied }) {
+  const prevM = targetMonth - 1 < 1 ? 12 : targetMonth - 1
+  const prevY = targetMonth - 1 < 1 ? targetYear - 1 : targetYear
+  const [fromMonth, setFromMonth] = useState(prevM)
+  const [fromYear, setFromYear] = useState(prevY)
+  const [overwrite, setOverwrite] = useState(true)
+  const [copying, setCopying] = useState(false)
+  const [error, setError] = useState(null)
+
+  const months = Array.from({ length: 12 }, (_, i) => i + 1)
+  const years = Array.from({ length: 5 }, (_, i) => targetYear + 1 - i)
+  const sameAsTarget = fromMonth === targetMonth && fromYear === targetYear
+
+  const handleCopy = async () => {
+    if (sameAsTarget) { setError('Pick a different month to copy from.'); return }
+    setError(null)
+    setCopying(true)
+    try {
+      await copyBudgets({ fromMonth, fromYear, toMonth: targetMonth, toYear: targetYear, overwrite })
+      await onCopied?.()
+      onClose()
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Failed to copy budget.')
+    } finally {
+      setCopying(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+          <div className="flex items-center gap-2">
+            <Copy size={18} className="text-slate-500" />
+            <h2 className="font-semibold text-slate-800 text-base">Copy budget from another month</h2>
+          </div>
+          <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded transition-colors">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="px-6 py-4 space-y-4">
+          <p className="text-sm text-slate-500">
+            Copy caps into <span className="font-medium text-slate-700">{getMonthName(targetMonth)} {targetYear}</span> from:
+          </p>
+          <div className="flex gap-2">
+            <select className="input" value={fromMonth} onChange={(e) => setFromMonth(Number(e.target.value))}>
+              {months.map((m) => <option key={m} value={m}>{getMonthName(m)}</option>)}
+            </select>
+            <select className="input max-w-[110px]" value={fromYear} onChange={(e) => setFromYear(Number(e.target.value))}>
+              {years.map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={overwrite}
+              onChange={(e) => setOverwrite(e.target.checked)}
+              className="w-3.5 h-3.5 rounded accent-indigo-600"
+            />
+            Overwrite caps that already exist this month
+          </label>
+          {error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs">{error}</div>
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-2">
+          <button onClick={onClose} className="btn-secondary text-sm">Cancel</button>
+          <button
+            onClick={handleCopy}
+            disabled={copying || sameAsTarget}
+            className="btn-primary text-sm flex items-center gap-1.5"
+          >
+            {copying ? <><Loader2 size={14} className="animate-spin" /> Copying…</> : <><Copy size={14} /> Copy</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── AI suggestion review modal (v2 — history-driven, no allocation) ──────────
 
 function AutoSuggestModal({ month, year, onClose, onApplied }) {
@@ -558,6 +643,7 @@ export default function Budgets() {
   } = useBudget()
 
   const [suggestOpen, setSuggestOpen] = useState(false)
+  const [copyOpen, setCopyOpen] = useState(false)
   const [actionError, setActionError] = useState(null)
 
   const summary = data?.summary
@@ -644,7 +730,13 @@ export default function Budgets() {
               {summary.net_overage_count} over budget
             </span>
           )}
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => setCopyOpen(true)}
+              className="btn-secondary flex items-center gap-1.5"
+            >
+              <Copy size={14} className="text-slate-500" /> Copy from…
+            </button>
             <button
               onClick={() => setSuggestOpen(true)}
               className="btn-secondary flex items-center gap-1.5"
@@ -723,6 +815,15 @@ export default function Budgets() {
           year={selectedYear}
           onClose={() => setSuggestOpen(false)}
           onApplied={refetch}
+        />
+      )}
+
+      {copyOpen && (
+        <CopyFromModal
+          targetMonth={selectedMonth}
+          targetYear={selectedYear}
+          onClose={() => setCopyOpen(false)}
+          onCopied={refetch}
         />
       )}
     </div>

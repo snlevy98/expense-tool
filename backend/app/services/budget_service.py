@@ -715,6 +715,63 @@ async def apply_suggestions(
     return applied
 
 
+async def copy_budgets(
+    db: AsyncSession,
+    from_month: int,
+    from_year: int,
+    to_month: int,
+    to_year: int,
+    overwrite: bool = True,
+) -> int:
+    """Copy a source month's subcategory caps (and lock states) into the target
+    month. ``overwrite`` replaces existing target caps; otherwise only fills
+    subcategories not already budgeted there. Extra target-only caps are left
+    untouched. Returns the number of caps created/updated. The caller commits.
+
+    Like any cap edit, this does not re-settle or propagate into saved balances
+    (so copying into a closed month is a safe, record-only change)."""
+    if (from_year, from_month) == (to_year, to_month):
+        return 0
+
+    src_result = await db.execute(
+        select(Budget).where(
+            and_(
+                Budget.month == from_month,
+                Budget.year == from_year,
+                Budget.subcategory_id.isnot(None),
+            )
+        )
+    )
+    source = src_result.scalars().all()
+    if not source:
+        return 0
+
+    dst_result = await db.execute(
+        select(Budget.subcategory_id).where(
+            and_(
+                Budget.month == to_month,
+                Budget.year == to_year,
+                Budget.subcategory_id.isnot(None),
+            )
+        )
+    )
+    existing = {r[0] for r in dst_result.all()}
+
+    copied = 0
+    for b in source:
+        if not overwrite and b.subcategory_id in existing:
+            continue
+        budget = await set_subcategory_cap(
+            db, b.subcategory_id, to_month, to_year, Decimal(str(b.amount))
+        )
+        if budget is None:  # subcategory gone or income-side (FR-1.8)
+            continue
+        if bool(budget.locked) != bool(b.locked):
+            await set_subcategory_lock(db, b.subcategory_id, to_month, to_year, bool(b.locked))
+        copied += 1
+    return copied
+
+
 # ---------------------------------------------------------------------------
 # History — budget vs. actual over a month range
 # ---------------------------------------------------------------------------

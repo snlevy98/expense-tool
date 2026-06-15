@@ -13,6 +13,8 @@ from app.schemas.budget import (
     BudgetDashboardResponse,
     BudgetHistoryResponse,
     BudgetSuggestResponse,
+    CopyBudgetRequest,
+    CopyBudgetResponse,
     CapUpdate,
     ExclusionRuleCreate,
     ExclusionRuleOut,
@@ -23,6 +25,7 @@ from app.schemas.budget import (
 from app.services import budget_lifecycle, budget_math
 from app.services.budget_service import (
     apply_suggestions,
+    copy_budgets,
     create_exclusion_rule,
     delete_exclusion_rule,
     get_budget_dashboard,
@@ -161,6 +164,22 @@ async def apply_suggestions_endpoint(
     applied = await apply_suggestions(db, body.month, body.year, body.items)
     await db.commit()
     return ApplySuggestionsResponse(applied=applied)
+
+
+@router.post("/copy-from", response_model=CopyBudgetResponse)
+async def copy_budgets_endpoint(
+    body: CopyBudgetRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: dict = Depends(require_auth),
+) -> CopyBudgetResponse:
+    """Copy another month's caps (and locks) into the target month. Allowed for
+    closed target months — it's a record-only cap edit (no settlement effect)."""
+    await budget_lifecycle.ensure_month(db, body.to_month, body.to_year)
+    copied = await copy_budgets(
+        db, body.from_month, body.from_year, body.to_month, body.to_year, body.overwrite
+    )
+    await db.commit()
+    return CopyBudgetResponse(copied=copied)
 
 
 # ---------------------------------------------------------------------------

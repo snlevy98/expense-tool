@@ -76,6 +76,17 @@ export const applySuggestions = async (month, year, items) => {
   return data
 }
 
+export const copyBudgets = async ({ fromMonth, fromYear, toMonth, toYear, overwrite = true }) => {
+  const { data } = await api.post('/api/budgets/copy-from', {
+    from_month: fromMonth,
+    from_year: fromYear,
+    to_month: toMonth,
+    to_year: toYear,
+    overwrite,
+  })
+  return data
+}
+
 export const getBudgetHistory = async ({ from, to, categoryId, subcategoryId } = {}) => {
   const params = {}
   if (from) params.from = from

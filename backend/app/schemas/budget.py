@@ -150,6 +150,22 @@ class ApplySuggestionsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Copy budget from another month
+# ---------------------------------------------------------------------------
+
+class CopyBudgetRequest(BaseModel):
+    from_month: int = Field(ge=1, le=12)
+    from_year: int = Field(ge=2000, le=2100)
+    to_month: int = Field(ge=1, le=12)
+    to_year: int = Field(ge=2000, le=2100)
+    overwrite: bool = True  # replace existing target caps; False = only fill gaps
+
+
+class CopyBudgetResponse(BaseModel):
+    copied: int
+
+
+# ---------------------------------------------------------------------------
 # History (budget vs. actual over time)
 # ---------------------------------------------------------------------------
 
