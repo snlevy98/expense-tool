@@ -34,6 +34,15 @@ class DashboardCategoryRow(BaseModel):
     subcategories: list[DashboardSubcategoryRow] = []
 
 
+class DashboardUnbudgetedRow(BaseModel):
+    category_id: str
+    category_name: str
+    category_color: str
+    subcategory_id: str
+    subcategory_name: str
+    spent: Decimal  # netted spend this month in a subcategory with no cap
+
+
 class DashboardResponse(BaseModel):
     month: int
     year: int
@@ -41,6 +50,8 @@ class DashboardResponse(BaseModel):
     rows: list[DashboardCategoryRow]
     total_budget: Decimal
     total_spent: Decimal
+    unbudgeted_spending: list[DashboardUnbudgetedRow] = []
+    total_unbudgeted_spent: Decimal = Decimal("0")
 
 
 class TrendPoint(BaseModel):

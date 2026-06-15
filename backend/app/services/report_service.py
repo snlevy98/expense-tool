@@ -18,6 +18,7 @@ from app.schemas.report import (
     DashboardResponse,
     DashboardSubcategoryRow,
     DashboardSummary,
+    DashboardUnbudgetedRow,
     TopMerchantRow,
     TrendPoint,
     TrendResponse,
@@ -211,6 +212,29 @@ async def get_dashboard(
             )
         )
 
+    # ── Unbudgeted spending: subcategories with spend but no cap this month ──
+    unbudgeted_spending: list[DashboardUnbudgetedRow] = []
+    total_unbudgeted_spent = Decimal("0")
+    for cat in budgeted_categories:
+        for sub in cat.subcategories:
+            if not sub.is_active or sub.id in subcat_budget_map:
+                continue
+            sub_spent = subcat_spend_map.get(sub.id, Decimal("0"))
+            if sub_spent <= 0:
+                continue
+            unbudgeted_spending.append(
+                DashboardUnbudgetedRow(
+                    category_id=str(cat.id),
+                    category_name=cat.name,
+                    category_color=cat.color,
+                    subcategory_id=str(sub.id),
+                    subcategory_name=sub.name,
+                    spent=sub_spent,
+                )
+            )
+            total_unbudgeted_spent += sub_spent
+    unbudgeted_spending.sort(key=lambda r: r.spent, reverse=True)
+
     return DashboardResponse(
         month=month,
         year=year,
@@ -218,6 +242,8 @@ async def get_dashboard(
         rows=rows,
         total_budget=total_budget,
         total_spent=total_spent,
+        unbudgeted_spending=unbudgeted_spending,
+        total_unbudgeted_spent=total_unbudgeted_spent,
     )
 
 
