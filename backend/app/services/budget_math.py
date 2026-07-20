@@ -7,18 +7,57 @@ transactions (positive = expense, negative = refund/credit), so refunds net
 against spending (FR-4.1). Every consumer — budget dashboard, settlement,
 recompute, reports, AI-suggestion inputs — must use these helpers rather than
 rolling its own aggregation.
+
+Unreviewed transactions count provisionally: a transaction with no confirmed
+category (category_id IS NULL) is attributed to its AI-suggested subcategory
+until the user reviews it in the Categorize tab. Once reviewed, only the
+confirmed fields matter — a confirmed category with no subcategory does NOT
+fall back to a stale AI suggestion. Consumers that group or filter by
+category/subcategory must use effective_category_expr /
+effective_subcategory_expr (or budget_lifecycle.budget_snapshot, which applies
+the same rule) so the whole app agrees on where spend lands.
 """
 
 import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.transaction import Transaction
 
 ZERO = Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# Effective categorization (provisional AI attribution until reviewed)
+# ---------------------------------------------------------------------------
+
+def effective_category_expr():
+    """SQL expression: confirmed category, or the AI suggestion when the
+    transaction has not been reviewed yet."""
+    return case(
+        (Transaction.category_id.is_(None), Transaction.ai_suggested_category_id),
+        else_=Transaction.category_id,
+    )
+
+
+def effective_subcategory_expr():
+    """SQL expression: confirmed subcategory, or the AI-suggested subcategory
+    when the transaction has not been reviewed yet (category_id IS NULL)."""
+    return case(
+        (Transaction.category_id.is_(None), Transaction.ai_suggested_subcategory_id),
+        else_=Transaction.subcategory_id,
+    )
+
+
+def effective_subcategory_of(txn) -> uuid.UUID | None:
+    """Python twin of effective_subcategory_expr for in-memory Transaction
+    objects (used by budget_lifecycle.budget_snapshot)."""
+    if txn.category_id is None:
+        return txn.ai_suggested_subcategory_id
+    return txn.subcategory_id
 
 
 # ---------------------------------------------------------------------------
@@ -47,22 +86,24 @@ def next_month(month: int, year: int) -> tuple[int, int]:
 async def get_spent_by_subcategory(
     db: AsyncSession, month: int, year: int
 ) -> dict[uuid.UUID, Decimal]:
-    """Netted Spent per subcategory for one month, excluding flagged transactions."""
+    """Netted Spent per effective subcategory for one month, excluding flagged
+    transactions. Unreviewed spend counts under its AI-suggested subcategory."""
     start, end = month_range(month, year)
+    effective_sub = effective_subcategory_expr()
     result = await db.execute(
         select(
-            Transaction.subcategory_id,
+            effective_sub.label("subcategory_id"),
             func.sum(Transaction.amount).label("total"),
         )
         .where(
             and_(
-                Transaction.subcategory_id.isnot(None),
+                effective_sub.isnot(None),
                 Transaction.budget_excluded == False,  # noqa: E712
                 Transaction.transaction_date >= start,
                 Transaction.transaction_date < end,
             )
         )
-        .group_by(Transaction.subcategory_id)
+        .group_by(effective_sub)
     )
     return {row.subcategory_id: Decimal(str(row.total)) for row in result.all()}
 
@@ -70,12 +111,13 @@ async def get_spent_by_subcategory(
 async def get_spent_for_subcategory_month(
     db: AsyncSession, subcategory_id: uuid.UUID, month: int, year: int
 ) -> Decimal:
-    """Netted Spent for a single subcategory-month, excluding flagged transactions."""
+    """Netted Spent for a single effective subcategory-month, excluding
+    flagged transactions."""
     start, end = month_range(month, year)
     result = await db.execute(
         select(func.sum(Transaction.amount)).where(
             and_(
-                Transaction.subcategory_id == subcategory_id,
+                effective_subcategory_expr() == subcategory_id,
                 Transaction.budget_excluded == False,  # noqa: E712
                 Transaction.transaction_date >= start,
                 Transaction.transaction_date < end,
@@ -84,6 +126,35 @@ async def get_spent_for_subcategory_month(
     )
     total = result.scalar_one_or_none()
     return Decimal(str(total)) if total is not None else ZERO
+
+
+async def get_pending_spent_by_subcategory(
+    db: AsyncSession, month: int, year: int
+) -> dict[uuid.UUID, Decimal]:
+    """The unreviewed slice of Spent per subcategory: transactions counted via
+    their AI suggestion only (category_id IS NULL). Always a subset of
+    get_spent_by_subcategory — used for the "pending review" indicator."""
+    start, end = month_range(month, year)
+    result = await db.execute(
+        select(
+            Transaction.ai_suggested_subcategory_id,
+            func.sum(Transaction.amount).label("total"),
+        )
+        .where(
+            and_(
+                Transaction.category_id.is_(None),
+                Transaction.ai_suggested_subcategory_id.isnot(None),
+                Transaction.budget_excluded == False,  # noqa: E712
+                Transaction.transaction_date >= start,
+                Transaction.transaction_date < end,
+            )
+        )
+        .group_by(Transaction.ai_suggested_subcategory_id)
+    )
+    return {
+        row.ai_suggested_subcategory_id: Decimal(str(row.total))
+        for row in result.all()
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,10 @@ from app.models.subcategory import Subcategory
 from app.models.transaction import Transaction
 from app.schemas.transaction import TransactionOut, TransactionUpdate
 from app.services import budget_lifecycle
+from app.services.budget_math import (
+    effective_category_expr,
+    effective_subcategory_expr,
+)
 
 
 def _build_filters(
@@ -40,13 +44,15 @@ def _build_filters(
     if uncategorized:
         conditions.append(Transaction.category_id.is_(None))
     elif category_id:
-        conditions.append(Transaction.category_id == category_id)
+        # Effective attribution: unreviewed transactions match via their AI
+        # suggestion, so filtered lists agree with the budget Spent numbers.
+        conditions.append(effective_category_expr() == category_id)
     if exclude_amazon:
         conditions.append(Transaction.merchant_name != "Amazon")
     if amazon_only:
         conditions.append(Transaction.merchant_name == "Amazon")
     if subcategory_id:
-        conditions.append(Transaction.subcategory_id == subcategory_id)
+        conditions.append(effective_subcategory_expr() == subcategory_id)
     if date_from:
         conditions.append(Transaction.transaction_date >= date_from)
     if date_to:

@@ -16,6 +16,10 @@ class SubcategoryBudgetRow(BaseModel):
     subcategory_name: str
     cap: Decimal
     spent: Decimal              # netted (FR-4.1), exclusions filtered (FR-4.2)
+    # Slice of `spent` attributed via AI suggestion only (not yet reviewed in
+    # the Categorize tab). Always <= spent's unreviewed portion; 0 once all
+    # transactions are confirmed.
+    spent_pending_review: Decimal = Decimal("0")
     remaining: Decimal          # cap - spent (saved balance never raises it, FR-3.3)
     saved_balance: Decimal
     locked: bool
@@ -46,6 +50,7 @@ class UnbudgetedSubcategory(BaseModel):
 class BudgetSummary(BaseModel):
     total_budgeted: Decimal
     total_spent: Decimal
+    total_spent_pending_review: Decimal = Decimal("0")
     total_remaining: Decimal
     coverage_drawn: Decimal       # sum of provisional covered overages
     net_overage_count: int        # subcategories with net overage (FR-6.3)

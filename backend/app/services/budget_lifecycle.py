@@ -235,10 +235,15 @@ async def _get_or_create_balance(
 
 def budget_snapshot(txn) -> dict:
     """Capture the budget-relevant fields of a transaction. Take one before
-    and one after any mutation and pass both to reconcile_transaction_change."""
+    and one after any mutation and pass both to reconcile_transaction_change.
+
+    subcategory_id holds the *effective* subcategory (confirmed, or the AI
+    suggestion while unreviewed) so reconciliation tracks the same attribution
+    the Spent aggregation uses — including the move that happens when a review
+    confirms or corrects an AI suggestion."""
     return {
         "transaction_date": txn.transaction_date,
-        "subcategory_id": txn.subcategory_id,
+        "subcategory_id": budget_math.effective_subcategory_of(txn),
         "amount": txn.amount,
         "budget_excluded": txn.budget_excluded,
     }

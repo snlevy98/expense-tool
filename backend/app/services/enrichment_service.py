@@ -16,7 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.db.session import AsyncSessionLocal
 from app.models.category import Category
 from app.models.transaction import Transaction
-from app.services import ai_service, budget_service
+from app.services import ai_service, budget_lifecycle, budget_service
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +151,14 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                             )
                             s_map = {s["index"]: s for s in suggestions if isinstance(s, dict)}
 
+                            # Setting an AI suggestion moves unreviewed spend
+                            # into a budget (effective categorization), so
+                            # settled months need reconciling like any other
+                            # budget-relevant mutation (FR-4.4).
+                            snapshots: list[dict] = []
                             for i, txn in enumerate(chunk):
                                 s = s_map.get(i, {})
+                                before = budget_lifecycle.budget_snapshot(txn)
                                 try:
                                     if s.get("category_id"):
                                         txn.ai_suggested_category_id = uuid.UUID(s["category_id"])
@@ -161,6 +167,11 @@ async def run_background_enrichment(transactions: list[Transaction]) -> None:
                                 except (ValueError, AttributeError):
                                     pass
                                 txn.ai_enriched = True
+                                snapshots += [before, budget_lifecycle.budget_snapshot(txn)]
+
+                            await budget_lifecycle.reconcile_transaction_change(
+                                db, snapshots
+                            )
 
                             # Re-apply exclusion rules now that merchant names are
                             # normalized, so merchant-match rules catch the

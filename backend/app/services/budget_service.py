@@ -128,6 +128,7 @@ async def get_budget_dashboard(
     }
 
     spent_map = await budget_math.get_spent_by_subcategory(db, month, year)
+    pending_map = await budget_math.get_pending_spent_by_subcategory(db, month, year)
 
     balance_result = await db.execute(select(SavedBalance))
     balance_map: dict[uuid.UUID, Decimal] = {
@@ -139,6 +140,7 @@ async def get_budget_dashboard(
     unbudgeted: list[UnbudgetedSubcategory] = []
     total_budgeted = ZERO
     total_spent = ZERO
+    total_pending = ZERO
     coverage_drawn = ZERO
     net_overage_count = 0
 
@@ -161,6 +163,7 @@ async def get_budget_dashboard(
 
             cap = Decimal(str(b.amount))
             spent = spent_map.get(sub.id, ZERO)
+            pending = pending_map.get(sub.id, ZERO)
             saved = balance_map.get(sub.id, ZERO)
             overage = max(ZERO, spent - cap)
             covered = min(overage, saved)
@@ -173,6 +176,7 @@ async def get_budget_dashboard(
                     subcategory_name=sub.name,
                     cap=cap,
                     spent=spent,
+                    spent_pending_review=pending,
                     remaining=cap - spent,
                     saved_balance=saved,
                     locked=b.locked,
@@ -185,6 +189,7 @@ async def get_budget_dashboard(
 
             total_budgeted += cap
             total_spent += spent
+            total_pending += pending
             coverage_drawn += covered
             if net > 0:
                 net_overage_count += 1
@@ -210,6 +215,7 @@ async def get_budget_dashboard(
         summary=BudgetSummary(
             total_budgeted=total_budgeted,
             total_spent=total_spent,
+            total_spent_pending_review=total_pending,
             total_remaining=total_budgeted - total_spent,
             coverage_drawn=coverage_drawn,
             net_overage_count=net_overage_count,

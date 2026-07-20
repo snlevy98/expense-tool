@@ -193,7 +193,17 @@ function CategoryGroup({ group, isClosed, onSaveCap, onToggleLock, onRemove, onD
               onSave={(amount) => onSaveCap(sub.subcategory_id, amount)}
             />
           </td>
-          <td className="table-cell tabular-nums text-slate-600">{formatCurrency(sub.spent)}</td>
+          <td className="table-cell tabular-nums text-slate-600">
+            {formatCurrency(sub.spent)}
+            {parseFloat(sub.spent_pending_review) !== 0 && (
+              <span
+                className="ml-1 text-xs text-amber-600"
+                title={`${formatCurrency(sub.spent_pending_review)} of this is AI-categorized and pending review in the Categorize tab`}
+              >
+                ({formatCurrency(sub.spent_pending_review)} pending)
+              </span>
+            )}
+          </td>
           <td className={`table-cell tabular-nums ${parseFloat(sub.remaining) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
             {formatCurrency(sub.remaining)}
           </td>
@@ -714,6 +724,14 @@ export default function Budgets() {
           <span className="text-slate-600">
             Spent: <span className="font-semibold text-slate-800 tabular-nums">{formatCurrency(summary.total_spent)}</span>
           </span>
+          {parseFloat(summary.total_spent_pending_review) !== 0 && (
+            <span
+              className="text-amber-600"
+              title="AI-categorized spending not yet reviewed in the Categorize tab — included in Spent"
+            >
+              Pending review: <span className="font-semibold tabular-nums">{formatCurrency(summary.total_spent_pending_review)}</span>
+            </span>
+          )}
           <span className="text-slate-600">
             Remaining:{' '}
             <span className={`font-semibold tabular-nums ${parseFloat(summary.total_remaining) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>

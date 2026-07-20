@@ -1,5 +1,9 @@
 """
 Report query logic: dashboard, trends, top_merchants, ytd, recurring.
+
+Category/subcategory attribution uses budget_math's effective expressions:
+unreviewed transactions count under their AI-suggested category until reviewed,
+matching the Budgets tab (single app-wide policy).
 """
 
 import uuid
@@ -13,6 +17,10 @@ from sqlalchemy.orm import selectinload
 from app.models.budget import Budget
 from app.models.category import Category
 from app.models.transaction import Transaction
+from app.services.budget_math import (
+    effective_category_expr,
+    effective_subcategory_expr,
+)
 from app.schemas.report import (
     DashboardCategoryRow,
     DashboardResponse,
@@ -88,16 +96,19 @@ async def get_dashboard(
     else:
         end_date = date(year, month + 1, 1) - timedelta(days=1)
 
-    # Aggregate spending per category for the month (all transactions, both signs)
+    # Aggregate spending per effective category for the month (all transactions,
+    # both signs)
+    effective_cat = effective_category_expr()
+    effective_sub = effective_subcategory_expr()
     spend_result = await db.execute(
-        select(Transaction.category_id, func.sum(Transaction.amount).label("total"))
+        select(effective_cat.label("category_id"), func.sum(Transaction.amount).label("total"))
         .where(
             and_(
                 Transaction.transaction_date >= start_date,
                 Transaction.transaction_date <= end_date,
             )
         )
-        .group_by(Transaction.category_id)
+        .group_by(effective_cat)
     )
     spend_all: dict[uuid.UUID | None, Decimal] = {
         row.category_id: Decimal(str(row.total)) for row in spend_result.all()
@@ -115,16 +126,16 @@ async def get_dashboard(
     # Spent: netted (refunds reduce it, FR-4.1) for non-excluded categories,
     # ignoring budget-excluded transactions (FR-4.2)
     spent_result = await db.execute(
-        select(Transaction.category_id, func.sum(Transaction.amount).label("total"))
+        select(effective_cat.label("category_id"), func.sum(Transaction.amount).label("total"))
         .where(
             and_(
                 Transaction.transaction_date >= start_date,
                 Transaction.transaction_date <= end_date,
                 Transaction.budget_excluded == False,  # noqa: E712
-                Transaction.category_id.in_([c.id for c in budgeted_categories]),
+                effective_cat.in_([c.id for c in budgeted_categories]),
             )
         )
-        .group_by(Transaction.category_id)
+        .group_by(effective_cat)
     )
     spend_map: dict[uuid.UUID, Decimal] = {
         row.category_id: Decimal(str(row.total)) for row in spent_result.all()
@@ -133,7 +144,7 @@ async def get_dashboard(
     # Subcategory-level spending (netted, exclusions filtered)
     subcat_spend_result = await db.execute(
         select(
-            Transaction.subcategory_id,
+            effective_sub.label("subcategory_id"),
             func.sum(Transaction.amount).label("total"),
         )
         .where(
@@ -141,11 +152,11 @@ async def get_dashboard(
                 Transaction.transaction_date >= start_date,
                 Transaction.transaction_date <= end_date,
                 Transaction.budget_excluded == False,  # noqa: E712
-                Transaction.category_id.in_([c.id for c in budgeted_categories]),
-                Transaction.subcategory_id.isnot(None),
+                effective_cat.in_([c.id for c in budgeted_categories]),
+                effective_sub.isnot(None),
             )
         )
-        .group_by(Transaction.subcategory_id)
+        .group_by(effective_sub)
     )
     subcat_spend_map: dict[uuid.UUID, Decimal] = {
         row.subcategory_id: Decimal(str(row.total))
@@ -219,18 +230,18 @@ async def get_dashboard(
     if excluded_categories:
         sys_result = await db.execute(
             select(
-                Transaction.category_id,
-                Transaction.subcategory_id,
+                effective_cat.label("category_id"),
+                effective_sub.label("subcategory_id"),
                 func.sum(Transaction.amount).label("total"),
             )
             .where(
                 and_(
                     Transaction.transaction_date >= start_date,
                     Transaction.transaction_date <= end_date,
-                    Transaction.category_id.in_([c.id for c in excluded_categories]),
+                    effective_cat.in_([c.id for c in excluded_categories]),
                 )
             )
-            .group_by(Transaction.category_id, Transaction.subcategory_id)
+            .group_by(effective_cat, effective_sub)
         )
         by_cat: dict[uuid.UUID, dict] = {}
         for row in sys_result.all():
@@ -297,7 +308,7 @@ async def get_trends(
         Transaction.budget_excluded == False,  # noqa: E712
     ]
     if category_id:
-        conditions.append(Transaction.category_id == category_id)
+        conditions.append(effective_category_expr() == category_id)
 
     result = await db.execute(
         select(
@@ -384,9 +395,10 @@ async def get_ytd(db: AsyncSession, year: int) -> YTDResponse:
     start_date = date(year, 1, 1)
     end_date = date(year, 12, 31)
 
+    effective_cat = effective_category_expr()
     spend_result = await db.execute(
         select(
-            Transaction.category_id,
+            effective_cat.label("category_id"),
             func.extract("month", Transaction.transaction_date).label("month"),
             func.sum(Transaction.amount).label("total"),
         )
@@ -398,7 +410,7 @@ async def get_ytd(db: AsyncSession, year: int) -> YTDResponse:
             )
         )
         .group_by(
-            Transaction.category_id,
+            effective_cat,
             func.extract("month", Transaction.transaction_date),
         )
     )
