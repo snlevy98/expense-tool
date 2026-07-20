@@ -1,6 +1,6 @@
 # Expense Tracker
 
-A self-hosted household expense tracking app with AI-powered transaction categorization, budget management, and multi-source import (CSV, Excel, Amazon order history).
+A self-hosted household expense tracking app with AI-powered transaction categorization, budget management, automatic bank sync via Plaid, and multi-source import (CSV, Excel, Amazon order history).
 
 **Stack:** FastAPI (Python) · PostgreSQL · React · Supabase Auth · Google Gemini · Groq · Cohere · Render · Vercel
 
@@ -42,6 +42,7 @@ A self-hosted household expense tracking app with AI-powered transaction categor
 | [Google AI Studio](https://aistudio.google.com) | Merchant name normalization | Free API key |
 | [Groq](https://console.groq.com) | Transaction category suggestions | Free (100k tokens/day) |
 | [Cohere](https://dashboard.cohere.com) | Recurring transaction detection | Free trial key |
+| [Plaid](https://dashboard.plaid.com) | Automatic bank/credit-card transaction sync | Free (Trial plan, 10 institutions) |
 | [Render](https://render.com) | Backend API hosting | Free tier (spins down when idle) |
 | [Vercel](https://vercel.com) | Frontend hosting | Free |
 
@@ -399,6 +400,13 @@ The seed script is safe to re-run — it skips anything that already exists.
 | `GEMINI_API_KEY` | Yes | Google AI Studio API key. Used for merchant normalization and as fallback for other AI tasks. |
 | `GROQ_API_KEY` | No | Groq API key. Used for category suggestions. Falls back to Gemini if not set. |
 | `COHERE_API_KEY` | No | Cohere API key. Used for recurring transaction detection. Falls back to Gemini if not set. |
+| `PLAID_CLIENT_ID` | No | Plaid client ID. Without it the Plaid endpoints are disabled and import is CSV-only. |
+| `PLAID_SECRET` | No | Plaid secret for the environment named in `PLAID_ENV`. |
+| `PLAID_ENV` | No | `sandbox` (default) or `production`. |
+| `PLAID_WEBHOOK_URL` | No | Full public URL of the webhook receiver, e.g. `https://your-api.onrender.com/api/plaid/webhook`. Enables automatic syncs; without it, sync is on-demand from Settings. |
+| `PLAID_TOKEN_ENCRYPTION_KEY` | No | Fernet key used to encrypt Plaid access tokens at rest. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Strongly recommended in production; don't lose or rotate it casually — stored tokens can't be decrypted without it. |
+
+**Plaid setup:** create a team at [dashboard.plaid.com](https://dashboard.plaid.com), apply for the free Trial plan with the **Transactions** product, and register your frontend URL under **Developers → API → Allowed redirect URIs** (required for OAuth banks like Chase or Bank of America). Connect banks from the app's **Settings → Connected Banks** panel. Synced transactions arrive uncategorized, are AI-categorized in the background, and are reviewed in the Categorize tab; Venmo and Amazon keep their dedicated import flows.
 | `ALLOWED_ORIGINS` | Yes (prod) | Comma-separated list of allowed frontend origins for CORS. Example: `https://my-app.vercel.app,https://expenses.mydomain.com`. Not needed for local development. |
 | `ENVIRONMENT` | No | Set to `production` on Render. Defaults to `development`. |
 
