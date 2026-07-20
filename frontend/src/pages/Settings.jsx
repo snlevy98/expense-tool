@@ -1,10 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
-import { AlertCircle, Ban, Brain, Check, ChevronDown, ChevronRight, GripVertical, Loader2, Lock, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { AlertCircle, Ban, Brain, Building2, Check, ChevronDown, ChevronRight, GripVertical, Landmark, Loader2, Lock, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react'
+import { usePlaidLink } from 'react-plaid-link'
 import { useAppStore } from '../store/appStore'
 import { useCategories } from '../hooks/useCategories'
 import {
   createAccount, updateAccount, deleteAccount,
 } from '../services/accountService'
+import {
+  createLinkToken, exchangePublicToken, getPlaidItems, syncPlaid, removePlaidItem,
+} from '../services/plaidService'
 import {
   createCategory, updateCategory, deleteCategory,
   createSubcategory, updateSubcategory, deleteSubcategory,
@@ -624,6 +628,206 @@ function MachineLearningPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// Connected banks (Plaid) panel
+// ---------------------------------------------------------------------------
+
+// Mounted only once a link token exists; opens Plaid Link immediately.
+function PlaidLinkOpener({ token, onSuccess, onExit }) {
+  const { open, ready } = usePlaidLink({ token, onSuccess, onExit })
+  useEffect(() => { if (ready) open() }, [ready, open])
+  return null
+}
+
+function ConnectedBanksPanel({ onAccountsChanged }) {
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [linkToken, setLinkToken] = useState(null)
+  const [connecting, setConnecting] = useState(false)
+  const [syncingId, setSyncingId] = useState(null) // item id, or 'all'
+  const [notice, setNotice] = useState(null)
+
+  const load = async () => {
+    try {
+      setError(null)
+      const data = await getPlaidItems()
+      setItems(data.filter((i) => i.is_active))
+    } catch (e) {
+      // 503 = Plaid not configured on the backend — hide the panel's list, keep the hint
+      if (e.response?.status !== 503) {
+        setError(e.response?.data?.detail || e.message || 'Failed to load connected banks')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { load() }, [])
+
+  const handleConnect = async () => {
+    setConnecting(true)
+    setError(null)
+    setNotice(null)
+    try {
+      setLinkToken(await createLinkToken())
+      // PlaidLinkOpener mounts and opens the Link dialog
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message || 'Could not start Plaid Link')
+      setConnecting(false)
+    }
+  }
+
+  const handleLinkSuccess = useCallback(async (publicToken) => {
+    setLinkToken(null)
+    try {
+      await exchangePublicToken(publicToken)
+      setNotice('Bank connected. The initial transaction import runs in the background — transactions appear in the Categorize tab as they arrive.')
+      await load()
+      await onAccountsChanged?.()
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message || 'Failed to complete the connection')
+    } finally {
+      setConnecting(false)
+    }
+  }, [onAccountsChanged])
+
+  const handleLinkExit = useCallback(() => {
+    setLinkToken(null)
+    setConnecting(false)
+  }, [])
+
+  const handleSync = async (itemId = null) => {
+    setSyncingId(itemId ?? 'all')
+    setError(null)
+    setNotice(null)
+    try {
+      const { results } = await syncPlaid(itemId)
+      const added = results.reduce((n, r) => n + (r.added || 0), 0)
+      const notReady = results.some((r) => r.status === 'not_ready')
+      setNotice(
+        notReady
+          ? 'Plaid is still preparing this account’s history — try again in a minute.'
+          : `Sync complete — ${added} new transaction${added === 1 ? '' : 's'} imported.`
+      )
+      await load()
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message || 'Sync failed')
+    } finally {
+      setSyncingId(null)
+    }
+  }
+
+  const handleRemove = async (item) => {
+    if (!window.confirm(`Disconnect ${item.institution_name || 'this bank'}? Already-imported transactions are kept; new activity will no longer sync.`)) return
+    try {
+      await removePlaidItem(item.id)
+      await load()
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message || 'Failed to disconnect')
+    }
+  }
+
+  return (
+    <div className="card">
+      {linkToken && (
+        <PlaidLinkOpener token={linkToken} onSuccess={handleLinkSuccess} onExit={handleLinkExit} />
+      )}
+
+      <div className="flex items-start gap-2 mb-4">
+        <Landmark size={16} className="text-indigo-500 mt-0.5 shrink-0" />
+        <div className="flex-1">
+          <h2 className="font-semibold text-slate-700 text-base">Connected Banks</h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Banks and credit cards synced automatically via Plaid. Venmo and Amazon still use their own import flows.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {items.length > 0 && (
+            <button
+              onClick={() => handleSync()}
+              disabled={syncingId !== null}
+              className="btn-secondary py-1.5 px-3 text-sm flex items-center gap-1.5"
+              title="Pull the latest transactions from every connected bank"
+            >
+              <RefreshCw size={14} className={syncingId === 'all' ? 'animate-spin' : ''} />
+              Sync all
+            </button>
+          )}
+          <button
+            onClick={handleConnect}
+            disabled={connecting}
+            className="btn-primary py-1.5 px-3 text-sm"
+          >
+            {connecting ? (
+              <><Loader2 size={14} className="animate-spin" /> Opening…</>
+            ) : (
+              <><Plus size={14} /> Connect a bank</>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+      {notice && (
+        <div className="mb-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-sm text-emerald-700">
+          {notice}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-slate-400 flex items-center gap-2">
+          <Loader2 size={14} className="animate-spin" /> Loading connected banks…
+        </p>
+      ) : items.length === 0 ? (
+        <p className="text-sm text-slate-400 italic">
+          No banks connected yet. Click “Connect a bank” to link one — its accounts and transactions import automatically.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {items.map((item) => (
+            <div key={item.id} className="flex items-center gap-3 px-4 py-3 border border-slate-200 rounded-lg">
+              <Building2 size={18} className="text-slate-400 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-slate-700">
+                  {item.institution_name || 'Bank'}
+                </div>
+                <div className="text-xs text-slate-400 truncate">
+                  {(item.accounts || []).map((a) => a.name).join(' · ') || 'No accounts'}
+                </div>
+              </div>
+              <div className="text-xs text-slate-400 whitespace-nowrap">
+                {item.last_synced_at
+                  ? <>Synced {formatRelativeTime(item.last_synced_at)}</>
+                  : 'Initial import pending'}
+              </div>
+              <button
+                onClick={() => handleSync(item.id)}
+                disabled={syncingId !== null}
+                className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded"
+                title="Sync now"
+              >
+                <RefreshCw size={14} className={syncingId === item.id ? 'animate-spin' : ''} />
+              </button>
+              <button
+                onClick={() => handleRemove(item)}
+                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded"
+                title="Disconnect bank"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Budget exclusion rules panel
 // ---------------------------------------------------------------------------
 
@@ -872,6 +1076,9 @@ export default function Settings() {
           </tbody>
         </table>
       </div>
+
+      {/* Connected banks (Plaid) */}
+      <ConnectedBanksPanel onAccountsChanged={fetchAccounts} />
 
       {/* Regular categories */}
       <div className="card">
