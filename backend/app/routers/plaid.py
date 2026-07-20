@@ -258,7 +258,7 @@ async def _initial_sync_with_retry(item_pk: uuid.UUID) -> None:
                 result = await plaid_service.sync_item(db, item)
                 got_data = (
                     result["added"] or result["modified"] or result["removed"]
-                    or result["skipped_pending"]
+                    or result["skipped_pending"] or result.get("skipped_old", 0)
                 )
                 if result["status"] == "ok" and got_data:
                     logger.info("Initial Plaid sync done for %s: %s",

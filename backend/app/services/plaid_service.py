@@ -21,7 +21,7 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import plaid
@@ -102,6 +102,22 @@ def plaid_error_code(exc: plaid.ApiException) -> str:
         return ""
 
 
+def sync_start_date() -> date | None:
+    """Parse PLAID_SYNC_START_DATE; transactions dated earlier are never
+    ingested. Returns None (no cutoff) when unset or malformed."""
+    raw = settings.PLAID_SYNC_START_DATE.strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        logger.warning(
+            "PLAID_SYNC_START_DATE %r is not a valid ISO date — ignoring cutoff",
+            raw,
+        )
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Access-token encryption at rest
 # ---------------------------------------------------------------------------
@@ -142,13 +158,22 @@ async def create_link_token(user_id: str) -> str:
     kwargs: dict = {}
     if settings.PLAID_WEBHOOK_URL:
         kwargs["webhook"] = settings.PLAID_WEBHOOK_URL
+
+    # Request only the history the cutoff allows (Plaid accepts 30–730 days).
+    # The date filter in _apply_sync_updates is the hard guarantee; this just
+    # avoids pulling data we would discard anyway.
+    days_requested = 730
+    cutoff = sync_start_date()
+    if cutoff is not None:
+        days_requested = max(30, min(730, (date.today() - cutoff).days + 1))
+
     request = LinkTokenCreateRequest(
         products=[Products("transactions")],
         client_name="Household Expense Tracker",
         country_codes=[CountryCode("US")],
         language="en",
         user=LinkTokenCreateRequestUser(client_user_id=user_id),
-        transactions=LinkTokenTransactions(days_requested=730),
+        transactions=LinkTokenTransactions(days_requested=days_requested),
         **kwargs,
     )
     response = await asyncio.to_thread(client.link_token_create, request)
@@ -310,7 +335,7 @@ async def sync_item(db: AsyncSession, item: PlaidItem) -> dict:
             code = plaid_error_code(exc)
             if code == "PRODUCT_NOT_READY":
                 return {"status": "not_ready", "added": 0, "modified": 0,
-                        "removed": 0, "skipped_pending": 0}
+                        "removed": 0, "skipped_pending": 0, "skipped_old": 0}
             if code == "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION":
                 # Data changed mid-pagination — restart from the stored cursor.
                 logger.info("Sync mutation during pagination for %s — restarting",
@@ -361,9 +386,16 @@ async def _apply_sync_updates(
         if a.plaid_account_id
     }
 
-    # --- Added (posted only) ---
+    # --- Added (posted only, on or after the configured cutoff) ---
     posted = [t for t in added_raw if not t.pending]
     skipped_pending = len(added_raw) - len(posted)
+
+    cutoff = sync_start_date()
+    skipped_old = 0
+    if cutoff is not None:
+        before = len(posted)
+        posted = [t for t in posted if t.date >= cutoff]
+        skipped_old = before - len(posted)
 
     new_ids = [t.transaction_id for t in posted]
     existing_refs: set[str] = set()
@@ -454,14 +486,17 @@ async def _apply_sync_updates(
         asyncio.create_task(run_background_enrichment(new_txns))
 
     logger.info(
-        "Plaid sync for %s: +%d added, ~%d modified, -%d removed, %d pending skipped",
-        item.item_id, len(new_txns), modified_count, removed_count, skipped_pending,
+        "Plaid sync for %s: +%d added, ~%d modified, -%d removed, "
+        "%d pending skipped, %d before cutoff skipped",
+        item.item_id, len(new_txns), modified_count, removed_count,
+        skipped_pending, skipped_old,
     )
     return {
         "added": len(new_txns),
         "modified": modified_count,
         "removed": removed_count,
         "skipped_pending": skipped_pending,
+        "skipped_old": skipped_old,
     }
 
 

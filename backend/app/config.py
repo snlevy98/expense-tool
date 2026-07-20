@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     # Fernet key for encrypting Plaid access tokens at rest. Optional in
     # development; strongly recommended in production.
     PLAID_TOKEN_ENCRYPTION_KEY: str = ""
+    # Earliest transaction date to ingest from Plaid (ISO format, e.g.
+    # 2026-01-01). Transactions dated before this are never imported — set it
+    # to the day after your last CSV import to avoid duplicating history that
+    # is already in the database. Empty = no cutoff (up to 730 days).
+    PLAID_SYNC_START_DATE: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
