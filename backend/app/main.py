@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.jobs.recurring_detection import run_recurring_detection
-from app.routers import accounts, amazon, budgets, categories, import_csv, ml, reports, subcategories, transactions
+from app.routers import accounts, amazon, budgets, categories, import_csv, ml, plaid, reports, subcategories, transactions
 from app.services.ml import categorize as ml_categorize
 
 logging.basicConfig(level=logging.INFO)
@@ -93,6 +93,7 @@ app.include_router(amazon.router, prefix=API_PREFIX)
 app.include_router(budgets.router, prefix=API_PREFIX)
 app.include_router(reports.router, prefix=API_PREFIX)
 app.include_router(ml.router, prefix=API_PREFIX)
+app.include_router(plaid.router, prefix=API_PREFIX)
 
 # ---------------------------------------------------------------------------
 # Health check

@@ -11,6 +11,17 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     # Comma-separated list of allowed origins, e.g. "https://myapp.vercel.app"
     ALLOWED_ORIGINS: str = ""
+    # Plaid (bank sync). Empty PLAID_CLIENT_ID disables the /plaid endpoints.
+    PLAID_CLIENT_ID: str = ""
+    PLAID_SECRET: str = ""
+    PLAID_ENV: str = "sandbox"  # "sandbox" | "production"
+    # Public URL Plaid calls with SYNC_UPDATES_AVAILABLE webhooks, e.g.
+    # https://my-api.onrender.com/api/plaid/webhook. Optional — without it,
+    # syncs only run on demand.
+    PLAID_WEBHOOK_URL: str = ""
+    # Fernet key for encrypting Plaid access tokens at rest. Optional in
+    # development; strongly recommended in production.
+    PLAID_TOKEN_ENCRYPTION_KEY: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

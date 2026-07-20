@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, String
+from sqlalchemy import Boolean, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,7 +20,17 @@ class Account(Base, TimestampMixin):
     sign_convention: Mapped[str] = mapped_column(
         String(20), nullable=False, default="positive_expense"
     )
+    # Set when this account is fed by a Plaid Item (bank sync) instead of CSV.
+    plaid_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("plaid_items.id"), nullable=True
+    )
+    plaid_account_id: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, unique=True
+    )
 
     transactions: Mapped[list["Transaction"]] = relationship(  # noqa: F821
         "Transaction", back_populates="account"
+    )
+    plaid_item: Mapped["PlaidItem | None"] = relationship(  # noqa: F821
+        "PlaidItem", back_populates="accounts"
     )
