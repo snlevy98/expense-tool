@@ -305,7 +305,9 @@ export default function Dashboard() {
                           <span className="font-semibold text-slate-700">{cat.category_name}</span>
                         </div>
                       </td>
-                      <td className="table-cell text-right tabular-nums font-semibold">{formatCurrency(cat.amount)}</td>
+                      <td className={`table-cell text-right tabular-nums font-semibold ${parseFloat(cat.amount) < 0 ? 'text-emerald-600' : 'text-slate-700'}`}>
+                        {formatCurrency(cat.amount)}
+                      </td>
                     </tr>
                     {cat.subcategories.map((sub) => (
                       <tr key={sub.subcategory_id} className="hover:bg-slate-50">
@@ -318,7 +320,9 @@ export default function Dashboard() {
                             {sub.subcategory_name}
                           </button>
                         </td>
-                        <td className="table-cell text-right tabular-nums text-slate-600">{formatCurrency(sub.amount)}</td>
+                        <td className={`table-cell text-right tabular-nums ${parseFloat(sub.amount) < 0 ? 'text-emerald-600' : 'text-slate-600'}`}>
+                          {formatCurrency(sub.amount)}
+                        </td>
                       </tr>
                     ))}
                   </Fragment>

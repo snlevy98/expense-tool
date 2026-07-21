@@ -37,7 +37,7 @@ class DashboardCategoryRow(BaseModel):
 class DashboardSystemSubcategoryRow(BaseModel):
     subcategory_id: str
     subcategory_name: str
-    amount: Decimal  # |net| activity this month
+    amount: Decimal  # signed net activity (positive = expense, negative = credit/income)
 
 
 class DashboardSystemCategoryRow(BaseModel):
@@ -45,7 +45,7 @@ class DashboardSystemCategoryRow(BaseModel):
     category_id: str
     category_name: str
     category_color: str
-    amount: Decimal  # |net| activity this month
+    amount: Decimal  # signed net activity (positive = expense, negative = credit/income)
     subcategories: list[DashboardSystemSubcategoryRow] = []
 
 

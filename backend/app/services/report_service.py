@@ -253,29 +253,31 @@ async def get_dashboard(
 
         for cat in excluded_categories:
             entry = by_cat.get(cat.id)
-            if not entry or abs(entry["total"]) == 0:
+            if not entry or entry["total"] == 0:
                 continue
             sub_names = {s.id: s.name for s in cat.subcategories}
+            # Signed: matches the app-wide convention (positive = expense,
+            # negative = credit/income) instead of collapsing sign with abs().
             sub_rows = [
                 DashboardSystemSubcategoryRow(
                     subcategory_id=str(sid),
                     subcategory_name=sub_names.get(sid, "—"),
-                    amount=abs(amt),
+                    amount=amt,
                 )
                 for sid, amt in entry["subs"].items()
-                if abs(amt) > 0
+                if amt != 0
             ]
-            sub_rows.sort(key=lambda r: r.amount, reverse=True)
+            sub_rows.sort(key=lambda r: abs(r.amount), reverse=True)
             system_categories.append(
                 DashboardSystemCategoryRow(
                     category_id=str(cat.id),
                     category_name=cat.name,
                     category_color=cat.color,
-                    amount=abs(entry["total"]),
+                    amount=entry["total"],
                     subcategories=sub_rows,
                 )
             )
-        system_categories.sort(key=lambda r: r.amount, reverse=True)
+        system_categories.sort(key=lambda r: abs(r.amount), reverse=True)
 
     return DashboardResponse(
         month=month,

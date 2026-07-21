@@ -20,11 +20,12 @@ def _by_name(resp):
 
 
 class TestDashboardSystemCategories:
-    async def test_lists_excluded_categories_with_abs_activity(
+    async def test_lists_excluded_categories_with_signed_activity(
         self, db_session, make_account, make_category, make_subcategory, make_transaction,
     ):
         acct = await make_account()
-        # Income is excluded; receipts are stored as negative amounts.
+        # Income is excluded; receipts are stored as negative amounts and stay
+        # negative here (signed), matching the app-wide sign convention.
         income = await make_category(name="Income", budget_excluded=True)
         salary = await make_subcategory(income, name="Salary")
         invest = await make_category(name="Investments", budget_excluded=True)
@@ -41,10 +42,10 @@ class TestDashboardSystemCategories:
 
         rows = _by_name(resp)
         assert set(rows) == {"Income", "Investments"}
-        assert rows["Income"].amount == D("5000")          # |net|
+        assert rows["Income"].amount == D("-5000")          # signed net
         assert rows["Investments"].amount == D("1200")
         assert rows["Income"].subcategories[0].subcategory_name == "Salary"
-        assert rows["Income"].subcategories[0].amount == D("5000")
+        assert rows["Income"].subcategories[0].amount == D("-5000")
 
     async def test_excluded_category_with_no_activity_is_omitted(
         self, db_session, make_account, make_category, make_subcategory, make_transaction,
