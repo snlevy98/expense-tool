@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { AlertCircle, CheckCircle, ChevronLeft, ChevronRight, Loader2, RefreshCw, Sparkles, XCircle } from 'lucide-react'
+import { AlertCircle, CheckCircle, ChevronLeft, ChevronRight, Loader2, RefreshCw, Sparkles, Trash2, XCircle } from 'lucide-react'
 import { getTransactions, updateTransaction, deleteTransaction } from '../services/transactionService'
 import { useCategories } from '../hooks/useCategories'
 import { useAppStore } from '../store/appStore'
@@ -9,8 +9,9 @@ import { api } from '../services/api'
 
 const PAGE_SIZE = 50
 
-function InlineCategoryRow({ transaction, categories, getSubcategories, onCategorized, onDeleted }) {
-  // Pre-populate from AI suggestions if available, otherwise from existing values
+// Shared stateful logic for one row — used by both the desktop table row and
+// the mobile card so behavior stays identical across the two layouts.
+function useCategorizeItem(transaction, getSubcategories, onCategorized, onDeleted) {
   const [categoryId, setCategoryId] = useState(
     transaction.ai_suggested_category_id || transaction.category_id || ''
   )
@@ -21,10 +22,8 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
 
   const subcategories = getSubcategories(categoryId)
 
-  // When category changes, keep the subcategory only if it belongs to the new category
   const handleCategoryChange = (e) => {
-    const newCatId = e.target.value
-    setCategoryId(newCatId)
+    setCategoryId(e.target.value)
     setSubcategoryId('')
   }
 
@@ -49,6 +48,20 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
       subcategory_id: subcategoryId || null,
     }).catch((err) => console.error('Failed to save category:', err))
   }, [transaction.id, categoryId, subcategoryId, onCategorized])
+
+  return {
+    categoryId, subcategoryId, saved, subcategories,
+    handleCategoryChange, handleSubcategoryChange, handleSave, handleDelete,
+  }
+}
+
+// ── Desktop: table row (lg and up) ──────────────────────────────────────────
+
+function CategorizeDesktopRow({ transaction, categories, getSubcategories, onCategorized, onDeleted }) {
+  const {
+    categoryId, subcategoryId, saved, subcategories,
+    handleCategoryChange, handleSubcategoryChange, handleSave, handleDelete,
+  } = useCategorizeItem(transaction, getSubcategories, onCategorized, onDeleted)
 
   return (
     <tr
@@ -135,6 +148,121 @@ function InlineCategoryRow({ transaction, categories, getSubcategories, onCatego
         </div>
       </td>
     </tr>
+  )
+}
+
+// ── Mobile: stacked card (below lg) — everything for one transaction fits
+// without horizontal scroll; category + subcategory sit side by side to
+// keep the card short. ──────────────────────────────────────────────────────
+
+function CategorizeMobileCard({ transaction, categories, getSubcategories, onCategorized, onDeleted }) {
+  const {
+    categoryId, subcategoryId, saved, subcategories,
+    handleCategoryChange, handleSubcategoryChange, handleSave, handleDelete,
+  } = useCategorizeItem(transaction, getSubcategories, onCategorized, onDeleted)
+
+  return (
+    <div
+      className={`p-3 transition-all duration-150 origin-top ${
+        saved ? 'opacity-0 scale-y-0' : ''
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-slate-800 text-sm truncate">{transaction.merchant_name}</div>
+          {transaction.merchant_name !== transaction.raw_description && (
+            <div className="text-xs text-slate-400 truncate">{transaction.raw_description}</div>
+          )}
+        </div>
+        <div
+          className={`font-semibold tabular-nums text-sm whitespace-nowrap ${
+            parseFloat(transaction.amount) < 0 ? 'text-emerald-600' : 'text-slate-800'
+          }`}
+        >
+          {formatCurrency(transaction.amount)}
+        </div>
+      </div>
+
+      <div className="text-xs text-slate-400 mt-0.5 mb-2">
+        {formatDate(transaction.transaction_date)} · {transaction.account_name || '—'}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <select
+          className="input py-1.5 text-sm"
+          value={categoryId}
+          onChange={handleCategoryChange}
+          disabled={saved}
+        >
+          <option value="">— Category —</option>
+          {categories.map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
+        <select
+          className="input py-1.5 text-sm"
+          value={subcategoryId}
+          onChange={handleSubcategoryChange}
+          disabled={saved || !categoryId || subcategories.length === 0}
+        >
+          <option value="">— Subcategory —</option>
+          {subcategories.map((s) => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex items-stretch gap-2">
+        <button
+          onClick={handleSave}
+          disabled={saved || !categoryId}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-colors ${
+            categoryId
+              ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+              : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+          }`}
+        >
+          <CheckCircle size={16} /> Confirm
+        </button>
+        <button
+          onClick={handleDelete}
+          disabled={saved}
+          title="Delete transaction"
+          className="shrink-0 px-3 rounded-lg border border-red-200 text-red-500 hover:bg-red-50 transition-colors"
+        >
+          <Trash2 size={16} />
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function SkeletonDesktopRow() {
+  return (
+    <tr>
+      {Array.from({ length: 7 }).map((_, j) => (
+        <td key={j} className="table-cell">
+          <div className="skeleton h-4 rounded w-full" />
+        </td>
+      ))}
+    </tr>
+  )
+}
+
+function SkeletonMobileCard() {
+  return (
+    <div className="p-3 space-y-2">
+      <div className="flex justify-between gap-2">
+        <div className="skeleton h-4 rounded w-2/3" />
+        <div className="skeleton h-4 rounded w-16" />
+      </div>
+      <div className="skeleton h-3 rounded w-1/3" />
+      <div className="grid grid-cols-2 gap-2">
+        <div className="skeleton h-8 rounded" />
+        <div className="skeleton h-8 rounded" />
+      </div>
+      <div className="skeleton h-8 rounded" />
+    </div>
   )
 }
 
@@ -260,7 +388,7 @@ export default function Categorize() {
 
       {/* Background enrichment progress banner */}
       {enrichStatus.running && (
-        <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg bg-indigo-50 text-indigo-700 text-sm font-medium">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 rounded-lg bg-indigo-50 text-indigo-700 text-sm font-medium">
           <div className="flex items-center gap-2">
             <Loader2 size={14} className="animate-spin shrink-0" />
             <span>
@@ -273,7 +401,7 @@ export default function Categorize() {
           </div>
           {enrichStatus.total > 0 && (
             <div className="flex items-center gap-2 shrink-0">
-              <div className="w-32 h-1.5 bg-indigo-200 rounded-full overflow-hidden">
+              <div className="w-24 sm:w-32 h-1.5 bg-indigo-200 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-indigo-500 rounded-full transition-all duration-500"
                   style={{ width: `${Math.round((enrichStatus.processed / enrichStatus.total) * 100)}%` }}
@@ -311,7 +439,8 @@ export default function Categorize() {
         </div>
       ) : (
         <div className="card p-0 overflow-hidden">
-          <div className="overflow-x-auto">
+          {/* Desktop: full table (lg and up) */}
+          <div className="hidden lg:block overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200">
@@ -326,17 +455,9 @@ export default function Categorize() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {loading
-                  ? Array.from({ length: 8 }).map((_, i) => (
-                      <tr key={i}>
-                        {Array.from({ length: 7 }).map((_, j) => (
-                          <td key={j} className="table-cell">
-                            <div className="skeleton h-4 rounded w-full" />
-                          </td>
-                        ))}
-                      </tr>
-                    ))
+                  ? Array.from({ length: 8 }).map((_, i) => <SkeletonDesktopRow key={i} />)
                   : transactions.map((tx) => (
-                      <InlineCategoryRow
+                      <CategorizeDesktopRow
                         key={tx.id}
                         transaction={tx}
                         categories={categories}
@@ -349,8 +470,25 @@ export default function Categorize() {
             </table>
           </div>
 
+          {/* Mobile: stacked cards (below lg) — no horizontal scroll, one
+              transaction's full context fits in a single glance */}
+          <div className="lg:hidden divide-y divide-slate-100">
+            {loading
+              ? Array.from({ length: 5 }).map((_, i) => <SkeletonMobileCard key={i} />)
+              : transactions.map((tx) => (
+                  <CategorizeMobileCard
+                    key={tx.id}
+                    transaction={tx}
+                    categories={categories}
+                    getSubcategories={getSubcategories}
+                    onCategorized={handleCategorized}
+                    onDeleted={handleCategorized}
+                  />
+                ))}
+          </div>
+
           {totalPages > 1 && (
-            <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 py-3 border-t border-slate-200">
               <p className="text-sm text-slate-500">
                 Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of{' '}
                 {total}
